@@ -19,9 +19,10 @@ organisations with bad models.**
 
 ## Status
 
-Stage 2 of 3. This repo currently answers *"what MCP servers exist here and
-what can they actually do?"* It does not yet compute reachability — that lands
-when the [segval](https://github.com/skb006/segval) prover is wired in.
+Stage 3 of 4. This repo answers *"what MCP servers exist here, what can they
+actually do, and whose authority do they carry?"* It does not yet compute
+reachability — that lands when the [segval](https://github.com/skb006/segval)
+prover is wired in.
 
 ```
 stage 1  parse configs      ->  what is declared      [done]
@@ -137,7 +138,7 @@ diffed; two runs against an unchanged deployment must diff to nothing.
 ## Tests
 
 ```bash
-.venv/bin/python -m pytest -q     # 151 tests
+.venv/bin/python -m pytest -q     # 264 tests
 ```
 
 `filterwarnings = ["error"]` is on. It has already caught one real file
