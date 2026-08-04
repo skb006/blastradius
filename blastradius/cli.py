@@ -19,11 +19,15 @@ import tempfile
 from pathlib import Path
 from typing import Sequence
 
+from .creds.model import CredentialReport
+from .creds.resolve import analyse
 from .discovery import discover
 from .model import Diagnostic, Inventory, ProbeResult
 from .probe import probe_all
 from .sweep import sweep
-from .report import render_diagnostics, render_inventory, render_probe, to_json
+from .report import (
+    render_credentials, render_diagnostics, render_inventory, render_probe, to_json,
+)
 from .mcp.transport import DEFAULT_TIMEOUT
 
 BANNER = (
@@ -62,6 +66,13 @@ def build_parser() -> argparse.ArgumentParser:
     pr.add_argument("--allow-spawn", action="store_true",
                     help="permit spawning stdio servers — this EXECUTES commands "
                          "declared in config; off by default")
+    pr.add_argument("--classify-credentials", action="store_true",
+                    help="identify each credential's issuer from its documented "
+                         "prefix — reads values locally, sends NOTHING")
+    pr.add_argument("--resolve-credentials", action="store_true",
+                    help="ask each issuer what the credential authorises. Implies "
+                         "--classify-credentials. Sends the credential to its own "
+                         "issuer ONLY, over a pinned host, using read-only endpoints")
     pr.add_argument("--sweep", action="store_true",
                     help="also scan listening loopback ports for MCP servers that "
                          "no config declares (finds shadow agents)")
@@ -132,14 +143,25 @@ def cmd_probe(args: argparse.Namespace) -> int:
         results.extend(swept)
         inv.diagnostics.extend(sweep_diags)
 
+    creds: CredentialReport | None = None
+    if args.classify_credentials or args.resolve_credentials:
+        creds = analyse(inv.deduped(), resolve=args.resolve_credentials,
+                        timeout=args.timeout)
+
     all_diags = list(inv.diagnostics) + [d for r in results for d in r.diagnostics]
+    if creds:
+        all_diags += list(creds.diagnostics)
+        all_diags += [d for r in creds.resolutions for d in r.diagnostics]
 
     if args.json:
-        print(to_json(inv, results))
+        print(to_json(inv, results, creds))
     else:
         _emit(render_inventory(inv))
         print()
         _emit(render_probe(results, verbose=args.verbose))
+        if creds:
+            print()
+            _emit(render_credentials(creds))
         if not args.quiet:
             print()
             print(render_diagnostics(all_diags))

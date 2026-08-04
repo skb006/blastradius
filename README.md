@@ -25,9 +25,9 @@ when the [segval](https://github.com/skb006/segval) prover is wired in.
 
 ```
 stage 1  parse configs      ->  what is declared      [done]
-stage 2  handshake + sweep  ->  what is running       [done]  <- you are here
-stage 3  resolve creds      ->  what it authorises    [next]
-stage 4  prove reach        ->  blast radius          [planned]
+stage 2  handshake + sweep  ->  what is running       [done]
+stage 3  resolve creds      ->  what it authorises    [done]  <- you are here
+stage 4  prove reach        ->  blast radius          [next]
 ```
 
 ## Install
@@ -48,6 +48,12 @@ blastradius discover -r ~/projects
 # talk to them and list what they really expose
 blastradius probe --sweep
 
+# identify every credential's issuer — reads values locally, sends NOTHING
+blastradius probe --classify-credentials
+
+# ask each issuer what its credential authorises, over a pinned host
+blastradius probe --resolve-credentials
+
 # CI-safe: no remote egress, no code execution, machine-readable
 blastradius probe --no-remote --json > agent-surface.json
 ```
@@ -67,6 +73,9 @@ These are enforced, not promised, and each has a test:
 | **never executes config** | stdio servers are only spawned under explicit `--allow-spawn` |
 | **no unexpected egress** | `--no-remote` restricts probing to loopback |
 | **no supply chain** | zero runtime dependencies |
+| **credentials go only to their issuer** | every provider pins its hosts; an unpinned host raises *before* a socket opens |
+| **no credential type can store a value** | a test walks every dataclass field; a future field named `token` fails the suite |
+| **echoed secrets are scrubbed** | issuers sometimes return the token in a 401 body; response text is scrubbed before it reaches a report |
 
 The test peer answers `tools/call` with a tripwire string. If the prober ever
 invoked a tool, the suite fails.
@@ -134,10 +143,46 @@ diffed; two runs against an unchanged deployment must diff to nothing.
 `filterwarnings = ["error"]` is on. It has already caught one real file
 descriptor leak in the stdio transport.
 
+## Stage 3: credential authority
+
+The question stage 3 answers is *whose permissions does an injected agent
+inherit?* It turns an opaque config key into a named principal:
+
+```
+  [!!] github:GITHUB_TOKEN
+        kind     : github/classic_pat  (exact, via value_prefix)
+        acts as  : github:octocat
+        scopes   : repo, workflow, read:org
+  [  ] deploy:AWS_ACCESS_KEY_ID
+        kind     : aws/credential_set
+        acts as  : arn:aws:iam::123456789012:user/ci-deploy  in 123456789012
+  [ !] stale:OLD_TOKEN
+        status   : invalid — REJECTED by issuer — grant is inert
+
+creds.high_impact_scope: github:GITHUB_TOKEN acts as github:octocat with
+                         write-capable scope(s): repo, workflow
+```
+
+**A two-rung safety ladder.** `--classify-credentials` identifies each issuer
+from its documented token prefix (`ghp_`, `AKIA`, `xoxb-`) and emits **no
+network traffic at all** — safe to run anywhere, on the first call, in a
+customer's environment. `--resolve-credentials` additionally asks the issuer,
+over a host pinned to that issuer, using endpoints that cannot mutate.
+
+Supported: GitHub, GitLab, Slack, Google, Hugging Face, OpenAI, AWS
+(`sts:GetCallerIdentity`, SigV4 signed with stdlib `hmac`), and RFC 7662
+introspection against an operator-nominated endpoint.
+
+**Inert credentials are findings.** A token the issuer rejects is a declared
+grant that confers nothing — the same class of result as an MCP server whose
+runtime is missing.
+
+**A live credential with no scope list is treated as unbounded**, not as
+harmless. AWS and OpenAI expose no scope introspection, so their reach is
+reported as unknown rather than empty.
+
 ## Next
 
-Stage 3 — resolve each discovered credential against its provider, read-only:
-GitHub `X-OAuth-Scopes`, AWS `GetCallerIdentity` + `SimulatePrincipalPolicy`,
-Google `tokeninfo`, RFC 7662 introspection. That is the 54% of grant edges
-configuration cannot see, and it is the part a competitor cannot clone in a
-weekend.
+Stage 4 — wire in the [segval](https://github.com/skb006/segval) prover and
+compute reachability over (principal × resource × operation), so the output
+becomes a witness path rather than an inventory.

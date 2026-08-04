@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 from typing import Iterable, Sequence
 
+from .creds.model import CredentialReport
 from .model import Diagnostic, Inventory, ProbeResult
 from .probe import coverage
 
@@ -126,6 +127,7 @@ def render_diagnostics(diags: Iterable[Diagnostic]) -> str:
 def to_json(
     inv: Inventory,
     results: Sequence[ProbeResult],
+    creds: CredentialReport | None = None,
     *,
     indent: int | None = 2,
 ) -> str:
@@ -142,5 +144,50 @@ def to_json(
             for r in sorted(results, key=lambda r: r.server.identity)
         ],
         "coverage": coverage(results),
+        "credentials": creds.to_json() if creds else None,
     }
     return json.dumps(payload, indent=indent, sort_keys=True)
+
+
+_CRED_NOTE = {
+    "resolved": "live",
+    "invalid": "REJECTED by issuer — grant is inert",
+    "expired": "expired — grant is inert",
+    "unsupported": "issuer exposes no introspection",
+    "no_value": "reference does not dereference here",
+    "network_error": "could not reach issuer",
+    "skipped": "not resolved (classify-only)",
+}
+
+
+def render_credentials(report: CredentialReport) -> str:
+    """Credential authority — the answer to 'whose permissions does this inherit?'"""
+    out = ["CREDENTIAL AUTHORITY", "=" * 68]
+    if not report.resolutions:
+        out.append("  no credentials declared")
+        return "\n".join(out)
+
+    for r in sorted(report.resolutions, key=lambda r: r.ref.ident):
+        c = r.classification
+        kind = (f"{c.provider}/{c.credential_class}"
+                if c.provider != "unknown" else "unidentified")
+        mark = "!!" if r.status == "resolved" and r.scopes else (
+            " !" if r.is_inert else "  ")
+        out.append(f"  [{mark}] {r.ref.ident}")
+        out.append(f"        kind     : {kind}  ({c.confidence}, via {c.matched_on})")
+        out.append(f"        status   : {r.status} — {_CRED_NOTE.get(r.status, '')}")
+        if r.principal:
+            acct = f"  in {r.account}" if r.account else ""
+            out.append(f"        acts as  : {r.principal}{acct}")
+        if r.scopes:
+            out.append(f"        scopes   : {', '.join(r.scopes)}")
+        if r.expires_at:
+            out.append(f"        expires  : {r.expires_at}")
+        if r.ref.indirection:
+            out.append(f"        inherits : {r.ref.indirection} from the launch environment")
+
+    s = report.to_json()["summary"]
+    out.append("")
+    out.append(f"  {s['credentials_found']} credential(s): "
+               f"{s['resolved']} resolved, {s['inert']} inert")
+    return "\n".join(out)
