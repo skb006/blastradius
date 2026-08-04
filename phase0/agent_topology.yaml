@@ -1,0 +1,26 @@
+# Phase 0 spike: the Kagenti "confused deputy" hospital scenario, encoded
+# into segval's EXISTING network IR to test whether the prover answers
+# agent-reachability questions unmodified.
+#
+# IR mapping under test:
+#   zone   -> principal (agent) or resource (tool/datastore)
+#   cidr   -> opaque identity range for that principal/resource
+#   device -> the authorization policy enforcement point
+#   rule   -> a grant
+#   dport  -> the operation being invoked
+zones:
+  agent_a_orchestrator:   { cidr: 10.1.0.0/24,  gateway: authz-gateway }
+  agent_d_insurance:      { cidr: 10.4.0.0/24,  gateway: authz-gateway }
+  tool_patient_records:   { cidr: 10.90.0.0/24, gateway: authz-gateway }
+  tool_insurance_api:     { cidr: 10.91.0.0/24, gateway: authz-gateway }
+devices:
+  authz-gateway:
+    configs:
+      - configs/authz_vulnerable.iptables-save
+routes:
+  - src: agent_a_orchestrator
+    via: authz-gateway
+    dst: [agent_d_insurance, tool_patient_records, tool_insurance_api]
+  - src: agent_d_insurance
+    via: authz-gateway
+    dst: [tool_patient_records, tool_insurance_api]
