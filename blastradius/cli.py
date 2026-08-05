@@ -34,12 +34,18 @@ from .report import (
 )
 from .mcp.transport import DEFAULT_TIMEOUT
 
+# Say exactly what it does. An earlier banner claimed it "never reads a
+# credential value" and "never sends your credentials anywhere"; stage 3 made
+# both false, because resolving a credential means presenting it to its issuer.
+# Overclaiming is worse than the behaviour it hides — a buyer who discovers the
+# gap stops believing the guarantees that *are* true.
 BANNER = (
-    "blastradius — read-only MCP prober. It never invokes a tool, never reads a "
-    "credential value, and never sends your findings or credentials anywhere. "
-    "It does contact the MCP endpoints declared in your config, because that is "
-    "how their surface is discovered; use --no-remote to restrict probing to "
-    "loopback."
+    "blastradius — read-only MCP prober. It never invokes a tool and never "
+    "writes findings anywhere but your terminal. It contacts the MCP endpoints "
+    "declared in your config, because that is how their surface is discovered; "
+    "--no-remote restricts that to loopback. Only --resolve-credentials reads a "
+    "credential value, and it presents it to that credential's own issuer and "
+    "nowhere else — redirects and proxies are refused, not followed."
 )
 
 

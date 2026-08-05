@@ -71,6 +71,10 @@ class McpClient:
         self.server_name: str | None = None
         self.server_version: str | None = None
         self.capabilities: tuple[str, ...] = ()
+        #: Methods whose enumeration we abandoned before the server said it
+        #: was done. A non-empty set means the observed surface is a subset of
+        #: the real one, so it must not be treated as complete.
+        self.truncated: set[str] = set()
 
     # -- guarded request path -------------------------------------------------
 
@@ -120,8 +124,20 @@ class McpClient:
     # -- read-only enumeration -------------------------------------------------
 
     def _paginate(self, method: str, key: str) -> list[dict[str, Any]]:
+        """Walk a paginated list, recording whether we gave up before the end.
+
+        A truncated enumeration is an *unknown* surface, not a small one. If
+        the page budget runs out (or a server loops us with a repeating
+        cursor) while a cursor is still live, the tools past that point are
+        invisible — and a prover that treats an incomplete tool list as
+        complete will happily emit PROVEN UNREACHABLE for a write that page 51
+        makes reachable. So the fact is recorded on the client and read by
+        ``probe.py``, which degrades the result to the documented
+        "unknown surface is unbounded" rule.
+        """
         items: list[dict[str, Any]] = []
         cursor: str | None = None
+        seen: set[str] = set()
         for _ in range(_MAX_PAGES):
             params = {"cursor": cursor} if cursor else None
             result = self._request(method, params)
@@ -130,7 +146,13 @@ class McpClient:
                 items.extend(x for x in page if isinstance(x, dict))
             cursor = result.get("nextCursor")
             if not isinstance(cursor, str) or not cursor:
-                break
+                return items
+            if cursor in seen:
+                self.truncated.add(method)
+                return items
+            seen.add(cursor)
+        # Budget exhausted with a cursor still live.
+        self.truncated.add(method)
         return items
 
     def list_tools(self) -> tuple[ToolSpec, ...]:

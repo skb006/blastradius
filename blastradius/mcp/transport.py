@@ -15,14 +15,17 @@ Safety notes that are load-bearing, not decorative:
 
 from __future__ import annotations
 
+import http.client
 import os
 import queue
 import shutil
+import signal
 import subprocess
 import threading
 import urllib.error
 import urllib.request
 from typing import Any, Protocol
+from urllib.parse import urlparse
 
 from .jsonrpc import ProtocolError, Request, iter_sse_payloads
 
@@ -93,6 +96,14 @@ class StdioTransport:
                 cwd=cwd,
                 env={**os.environ, **(env or {})},
                 text=True,
+                # Own process group. A child that forks a descendant leaves
+                # that descendant holding the stdout/stderr write ends, so the
+                # pipes never reach EOF, the pump threads stay parked, and
+                # close() hangs forever on a join it cannot win. Signalling
+                # the group reaches the whole tree — and because the group
+                # contains only what we spawned, it can never reach anything
+                # else.
+                start_new_session=True,
                 bufsize=1,
             )
         except FileNotFoundError as exc:
@@ -189,15 +200,21 @@ class StdioTransport:
         except OSError:
             pass
 
-        try:
-            self._proc.terminate()
-            self._proc.wait(timeout=3)
-        except (subprocess.TimeoutExpired, OSError):
+        for sig in (signal.SIGTERM, signal.SIGKILL):
             try:
-                self._proc.kill()
-                self._proc.wait(timeout=2)
+                os.killpg(os.getpgid(self._proc.pid), sig)
+            except (ProcessLookupError, PermissionError, OSError):
+                # No group (Windows, or already reaped) — fall back to the
+                # direct child, which is all we can reach anyway.
+                try:
+                    self._proc.terminate() if sig == signal.SIGTERM else self._proc.kill()
+                except OSError:
+                    pass
+            try:
+                self._proc.wait(timeout=3 if sig == signal.SIGTERM else 2)
+                break
             except (subprocess.TimeoutExpired, OSError):
-                pass
+                continue
 
         # Let the pump threads notice EOF before we pull the files out from
         # under them; they swallow ValueError/OSError either way.
@@ -212,6 +229,12 @@ class StdioTransport:
                 pass
 
 
+#: Cap on a single HTTP response body. urllib streams to EOF, so a peer that
+#: never closes drives unbounded allocation — measured at ~900 MiB RSS in
+#: under 10s before this cap existed.
+_MAX_BODY = 4 * 1024 * 1024
+
+
 class HttpTransport:
     """Streamable HTTP: POST JSON-RPC, accept a JSON body or an SSE stream."""
 
@@ -221,6 +244,17 @@ class HttpTransport:
         headers: dict[str, str] | None = None,
         timeout: float = DEFAULT_TIMEOUT,
     ) -> None:
+        # The URL comes from a config file the tool does not control — that is
+        # the whole threat model. urllib's opener handles `file:` and `ftp:`
+        # too, so an attacker who can drop a config could make the prober read
+        # a local file and carry its contents into the report. Only the two
+        # schemes MCP actually defines are allowed.
+        scheme = urlparse(url).scheme.lower()
+        if scheme not in ("http", "https"):
+            raise Unreachable(
+                f"refusing to open {scheme or '<none>'}:// — only http and "
+                f"https are valid MCP transports"
+            )
         self._url = url
         self._timeout = timeout
         self._session_id: str | None = None
@@ -244,14 +278,18 @@ class HttpTransport:
         )
         try:
             with urllib.request.urlopen(req, timeout=self._timeout) as resp:  # noqa: S310
-                body = resp.read().decode("utf-8", errors="replace")
+                body = resp.read(_MAX_BODY + 1).decode("utf-8", errors="replace")
+                if len(body) > _MAX_BODY:
+                    raise ProtocolError(
+                        f"response body exceeded {_MAX_BODY} bytes; refusing to "
+                        f"buffer an unbounded stream from {self._url}")
                 resp_headers = {k.lower(): v for k, v in resp.headers.items()}
                 sid = resp_headers.get("mcp-session-id")
                 if sid:
                     self._session_id = sid
                 return body, resp_headers
         except urllib.error.HTTPError as exc:
-            detail = exc.read().decode("utf-8", errors="replace")[:300]
+            detail = exc.read(4096).decode("utf-8", errors="replace")[:300]
             if exc.code in (401, 403):
                 challenge = None
                 if exc.headers:
@@ -270,6 +308,14 @@ class HttpTransport:
             raise
         except OSError as exc:
             raise Unreachable(str(exc)) from exc
+        except http.client.HTTPException as exc:
+            # IncompleteRead, BadStatusLine, LineTooLong and friends descend
+            # from Exception, NOT OSError, so without this clause a peer that
+            # truncates its response escapes probe_server entirely and kills
+            # the whole scan. Must stay AFTER the OSError clause:
+            # RemoteDisconnected subclasses both ConnectionResetError and
+            # BadStatusLine, and belongs in the connection-error bucket.
+            raise ProtocolError(f"malformed HTTP response: {exc!r}") from exc
 
     def exchange(self, request: Request) -> str:
         body, headers = self._post(request)

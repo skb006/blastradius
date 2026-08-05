@@ -104,9 +104,22 @@ class Encoding:
         return self.zone_of[node_id]
 
 
-def _zone_name(node_id: str) -> str:
-    """segval zone names must be plain identifiers; node ids carry colons."""
-    return node_id.replace(":", "__").replace("/", "_").replace(" ", "_")
+def _zone_name(node_id: str, index: int) -> str:
+    """segval zone names must be plain identifiers; node ids carry colons.
+
+    The character map is lossy and many-to-one — ``mcp:a b`` and ``mcp:a_b``
+    both spell ``mcp__a_b`` — so the enumeration index is appended to make the
+    name injective. Without it two distinct nodes share a zone, an address and
+    a CIDR, and ``encode()``'s last-write-wins dictionaries silently merge
+    them: one node's grants become the other's, and the rules of the loser are
+    evaluated against a device that no longer exists. That merge understates
+    reach, which is the one direction this tool must never err in.
+
+    The readable stem is kept because these names surface in segval traces
+    during debugging; correctness comes from the suffix, not the stem.
+    """
+    stem = node_id.replace(":", "__").replace("/", "_").replace(" ", "_")
+    return f"{stem}__z{index}"
 
 
 def _subnet(index: int) -> ipaddress.IPv4Network:
@@ -127,7 +140,13 @@ def encode(graph: AgentGraph) -> Encoding:
     zone_cidr: dict[str, Any] = {}
 
     for index, node_id in enumerate(sorted(graph.nodes)):
-        zname = _zone_name(node_id)
+        zname = _zone_name(node_id, index)
+        if zname in node_of:  # pragma: no cover - defended by construction
+            raise AssertionError(
+                f"zone name collision: {node_id!r} and {node_of[zname]!r} both "
+                f"encode to {zname!r}; the encoding would silently merge two "
+                f"nodes and understate reach"
+            )
         subnet = _subnet(index)
         zone_of[node_id] = zname
         node_of[zname] = node_id
@@ -152,7 +171,11 @@ def encode(graph: AgentGraph) -> Encoding:
     routes: list[Any] = []
 
     for (src_id, dst_id), members in sorted(caps_by_pair.items()):
-        device = f"hop__{_zone_name(src_id)}__{_zone_name(dst_id)}"
+        # Built from the injective zone names, not from a fresh sanitisation:
+        # two hops whose endpoints merely *spell* the same would otherwise
+        # share one device, and segval shares a Filter per device, so their
+        # rules would be evaluated against each other's traffic.
+        device = f"hop__{zone_of[src_id]}__{zone_of[dst_id]}"
         rules: list[Any] = []
         pr = seg["PortRange"]
 

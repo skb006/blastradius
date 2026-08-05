@@ -37,6 +37,31 @@ class HostNotPinned(RuntimeError):
     """A credential was about to be sent somewhere its issuer does not own."""
 
 
+class _RefuseRedirect(urllib.request.HTTPRedirectHandler):
+    """A pinned issuer that redirects is an anomaly, not a routing hint.
+
+    Following it would hand the credential to whatever host the redirect
+    names, with the Authorization header reattached. Refusing outright is the
+    right call for a security tool: a cross-host redirect out of an issuer's
+    own introspection endpoint is the event a user needs told about, not
+    something to silently chase.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[no-untyped-def]
+        raise HostNotPinned(
+            f"issuer responded {code} redirecting to {newurl!r}; refusing to "
+            f"forward a credential to a host the pin never approved"
+        )
+
+
+#: No redirects, and an empty ProxyHandler so HTTP_PROXY / HTTPS_PROXY /
+#: ALL_PROXY in the environment cannot re-route a credential through a host
+#: nobody pinned. Built once at import; it holds no per-request state.
+_OPENER = urllib.request.build_opener(
+    _RefuseRedirect, urllib.request.ProxyHandler({})
+)
+
+
 @dataclass(frozen=True, slots=True)
 class ProviderAnswer:
     status: ResolveStatus
@@ -83,7 +108,16 @@ def _request(
     body: bytes | None = None,
     timeout: float = DEFAULT_TIMEOUT,
 ) -> tuple[int, str, dict[str, str]]:
-    """Perform one pinned request. Returns (status, body, headers)."""
+    """Perform one pinned request. Returns (status, body, headers).
+
+    The pin is enforced on the *connection*, not merely on the declared URL.
+    ``Endpoint.check()`` validates the host we intend to contact, but urllib's
+    default opener would then follow a 3xx to anywhere — reattaching the
+    Authorization header — and would route through ``HTTP_PROXY``/``ALL_PROXY``
+    if the environment set one. Either path delivers a live credential to a
+    host the pin never approved, which is precisely the property this module
+    exists to prevent. ``_OPENER`` removes both.
+    """
     endpoint.check()
     req = urllib.request.Request(
         endpoint.url,
@@ -92,7 +126,7 @@ def _request(
         method=method,
     )
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310
+        with _OPENER.open(req, timeout=timeout) as resp:  # noqa: S310
             return (
                 resp.status,
                 resp.read(_MAX_BODY).decode("utf-8", errors="replace"),

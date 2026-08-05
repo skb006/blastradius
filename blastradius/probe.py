@@ -31,18 +31,18 @@ def _build_transport(
     spec: ServerSpec, *, allow_spawn: bool, timeout: float
 ) -> Transport:
     if spec.transport in ("http", "sse"):
-        if not spec.url:
+        if not spec.dial_url:
             raise ProtocolError("http transport declared without a url")
         # Credential-bearing headers were dropped at parse time by design, so
         # we probe unauthenticated. A 401 back is a *useful* result: it proves
         # a surface exists and is gated, which is a different fact from
         # "no server here".
-        return HttpTransport(spec.url, timeout=timeout)
+        return HttpTransport(spec.dial_url, timeout=timeout)
     if spec.transport == "stdio":
         if not spec.command:
             raise ProtocolError("stdio transport declared without a command")
         return StdioTransport(
-            spec.command, spec.args, timeout=timeout, allow_spawn=allow_spawn
+            spec.command, spec.dial_args, timeout=timeout, allow_spawn=allow_spawn
         )
     raise ProtocolError(f"unsupported transport {spec.transport!r}")
 
@@ -129,6 +129,21 @@ def probe_server(
                     Diagnostic("info", "probe.no_tools",
                                f"'{spec.name}' advertises tools capability but listed none",
                                spec.origin))
+
+            if client.truncated:
+                # An incomplete enumeration is an unknown surface. Falling
+                # through with a partial tool list would let the prover emit a
+                # proof of absence over tools it never saw.
+                diags.append(
+                    Diagnostic(
+                        "warn", "probe.surface_truncated",
+                        f"'{spec.name}' did not finish enumerating "
+                        f"{', '.join(sorted(client.truncated))}; the surface is "
+                        f"partial, so it is treated as unknown and unbounded",
+                        spec.origin,
+                    )
+                )
+                return finish("truncated")
 
             unannotated = [t for t in tools if t.read_only is None and t.destructive is None]
             if unannotated:

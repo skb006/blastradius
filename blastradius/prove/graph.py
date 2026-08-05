@@ -48,16 +48,50 @@ DELEGATED_ONLY: frozenset[str] = frozenset({"delegated"})
 
 AGENT_ID = "agent"
 
-#: Scopes that confer broad write authority. Shared with the stage-3 finding
-#: logic; kept here because the graph must decide edge capability even when
-#: no finding was emitted.
-WRITE_SCOPES = frozenset({
-    "repo", "write:org", "admin:org", "delete_repo", "workflow", "admin:repo_hook",
-    "write:packages", "admin:gpg_key", "user", "api", "write",
-    "chat:write", "files:write", "channels:manage", "admin", "write_repository",
-    "https://www.googleapis.com/auth/drive",
-    "https://www.googleapis.com/auth/gmail.modify",
+#: Scopes that confer *only* read authority. Everything else counts as write.
+#:
+#: This set is an allowlist and the default is deliberately the other way
+#: round. An earlier version enumerated WRITE scopes and defaulted the
+#: remainder to read, which meant every write scope nobody thought to list —
+#: the whole GitHub fine-grained vocabulary (``contents:write``,
+#: ``issues:write``, ``pull_requests:write``), ``public_repo``, ``gist``,
+#: ``write:discussion``, every Google drive.* variant — became a read edge and
+#: the prover emitted PROVEN UNREACHABLE for a write that was plainly
+#: reachable. A false proof of absence is the one output this tool must never
+#: produce, so the unbounded side of the default has to be write.
+#:
+#: Curated by hand, not by prefix: several scopes read as harmless and are
+#: not. ``security_events`` writes code-scanning alerts; ``gist`` creates
+#: gists; ``user`` can change profile and email.
+READ_ONLY_SCOPES = frozenset({
+    # GitHub (classic)
+    "read:org", "read:user", "read:packages", "read:discussion", "read:gpg_key",
+    "read:public_key", "read:repo_hook", "read:project", "read:audit_log",
+    "read:enterprise", "read:network", "user:email", "user:follow",
+    # GitLab
+    "read_api", "read_user", "read_repository", "read_registry",
+    "read_observability", "read_service_ping",
+    # Slack
+    "channels:read", "groups:read", "im:read", "mpim:read", "users:read",
+    "team:read", "files:read", "channels:history", "groups:history",
+    "im:history", "mpim:history", "emoji:read", "reactions:read",
+    "usergroups:read", "pins:read", "bookmarks:read", "users:read.email",
+    # Google
+    "https://www.googleapis.com/auth/drive.readonly",
+    "https://www.googleapis.com/auth/drive.metadata.readonly",
+    "https://www.googleapis.com/auth/gmail.readonly",
+    "https://www.googleapis.com/auth/gmail.metadata",
+    "https://www.googleapis.com/auth/calendar.readonly",
+    "https://www.googleapis.com/auth/spreadsheets.readonly",
+    "openid", "email", "profile", "userinfo.email", "userinfo.profile",
+    # Generic
+    "read", "readonly", "read-only", "view", "list", "get",
 })
+
+
+def scope_capability(scope: str) -> Capability:
+    """Classify a scope. Unknown scopes count as write — see READ_ONLY_SCOPES."""
+    return "read" if scope.strip().lower() in READ_ONLY_SCOPES else "write"
 
 
 @dataclass(frozen=True, slots=True)
@@ -156,12 +190,18 @@ def build_graph(
     g = AgentGraph()
     g.add_node(Node(AGENT_ID, "agent", "the AI agent"))
 
-    probe_by_name = {p.server.name: p for p in probes}
+    # Keyed on logical_identity, not name. Two projects each declaring a
+    # server called "issues" is ordinary, and keying on the name made every
+    # colliding spec resolve to whichever probe happened to survive the dict
+    # build — so an *unprobed* endpoint inherited a probed one's surface and
+    # contributed no `<unknown>` edge at all. That is a silent
+    # under-approximation, the one direction this tool must not err in.
+    probe_by_id = {p.server.logical_identity: p for p in probes}
 
     for spec in servers:
         node = _server_node(spec)
         g.add_node(node)
-        probe = probe_by_name.get(spec.name)
+        probe = probe_by_id.get(spec.logical_identity)
         mode, reason = classify_server(spec, probe)
         g.delegation[spec.name] = (mode, reason)
 
@@ -236,7 +276,7 @@ def build_graph(
         for scope in res.scopes:
             g.add_edge(Edge(
                 src=server_id, dst=pnode.id, operation=scope,
-                capability="write" if scope in WRITE_SCOPES else "read",
+                capability=scope_capability(scope),
                 evidence=f"{res.ref.ident} grants scope {scope!r} as {pnode.label}",
                 origin=res.ref.origin, modes=edge_modes,
             ))

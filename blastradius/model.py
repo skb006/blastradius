@@ -56,6 +56,7 @@ ProbeStatus = Literal[
     "timeout",
     "protocol_error",  # spoke, but not MCP we understand
     "auth_required",   # reachable, refused us -> surface exists but is closed
+    "truncated",       # spoke, but the enumeration never finished -> partial
 ]
 
 Severity = Literal["error", "warn", "info"]
@@ -115,6 +116,28 @@ class ServerSpec:
     credential_keys: tuple[str, ...] = ()
     declared_authz: tuple[str, ...] = ()
 
+    # -- connect targets: raw, never serialised, never printed ----------------
+    #
+    # ``url`` and ``args`` above hold the REDACTED forms, because those are
+    # what gets rendered and dumped. But a credential embedded in a URL or an
+    # argv element is *also* how the server is reached, so probing needs the
+    # original. Keeping it in a field that `to_json` deletes and `repr`
+    # excludes is what lets both properties hold at once: the report cannot
+    # leak it, and the prober can still connect.
+    #
+    # Re-reading the config at connect time was the alternative and is worse:
+    # it reintroduces a TOCTOU window between the scan and the probe.
+    connect_url: str | None = field(default=None, repr=False, compare=False)
+    connect_args: tuple[str, ...] = field(default=(), repr=False, compare=False)
+
+    @property
+    def dial_url(self) -> str | None:
+        return self.connect_url or self.url
+
+    @property
+    def dial_args(self) -> tuple[str, ...]:
+        return self.connect_args or self.args
+
     @property
     def identity(self) -> str:
         """Exact identity. Used when we need to talk to *this* endpoint."""
@@ -142,6 +165,10 @@ class ServerSpec:
         d["origin"] = str(self.origin)
         for k in ("args", "env_keys", "header_keys", "credential_keys", "declared_authz"):
             d[k] = list(d[k])
+        # The connect targets are the unredacted originals. They exist so the
+        # prober can dial; they must never reach an artifact.
+        d.pop("connect_url", None)
+        d.pop("connect_args", None)
         return d
 
 

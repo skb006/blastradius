@@ -72,13 +72,18 @@ These are enforced, not promised, and each has a test:
 | property | how it is enforced |
 |---|---|
 | **never invokes a tool** | `McpClient` has no method that can express a call; every method name is checked against a read-only allowlist before a byte is sent (`test_readonly.py`) |
-| **never reads a credential value** | secrets are dropped at parse time, so they never enter a dataclass and cannot leak through a new output path (`test_redact.py`) |
-| **never executes config** | stdio servers are only spawned under explicit `--allow-spawn` |
+| **no credential value reaches an artifact** | values are dropped at parse time — including the two shapes with no config key to match on, a secret inside a URL and a secret inside an argv element. The raw connect target lives in a field `to_json()` drops and `repr()` excludes (`test_review_regressions.py`) |
+| **never executes config** | stdio servers are only spawned under explicit `--allow-spawn`. Two independent guards, each pinned by its own test — mutation testing found that a single test covering only their conjunction let either be deleted silently |
+| **only http/https is dialled** | a `file://` URL in a config would otherwise make the prober read a local file into the report |
 | **no unexpected egress** | `--no-remote` restricts probing to loopback |
 | **no supply chain** | zero runtime dependencies |
-| **credentials go only to their issuer** | every provider pins its hosts; an unpinned host raises *before* a socket opens |
+| **credentials go only to their issuer** | every provider pins its hosts; an unpinned host raises *before* a socket opens. The pin binds the *connection*, not just the declared URL: redirects are refused rather than followed, and `HTTP_PROXY`/`ALL_PROXY` cannot re-route a credential |
 | **no credential type can store a value** | a test walks every dataclass field; a future field named `token` fails the suite |
 | **echoed secrets are scrubbed** | issuers sometimes return the token in a 401 body; response text is scrubbed before it reaches a report |
+
+`--resolve-credentials` is the one mode that reads a credential value, because
+resolving a token means presenting it. It goes to that token's own issuer and
+nowhere else. Everything else in the tool never reads one.
 
 The test peer answers `tools/call` with a tripwire string. If the prober ever
 invoked a tool, the suite fails.

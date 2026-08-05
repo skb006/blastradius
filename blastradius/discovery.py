@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any, Iterable, Iterator, Sequence
 
 from .model import Diagnostic, Inventory, Origin, ServerSpec, Transport
-from .redact import scrub_argv, split_keys
+from .redact import scrub_argv_with_keys, scrub_url, split_keys
 
 # Config keys that would constitute a *declared* authorisation scope. Their
 # near-total absence in real installs is the Phase 0 finding; we record
@@ -153,17 +153,32 @@ def _parse_server(name: str, cfg: Any, origin: Origin,
                                 f"server '{name}' declares neither command nor url",
                                 origin))
 
+    raw_url = str(cfg["url"]) if cfg.get("url") else None
+    safe_url, url_secret_keys = scrub_url(raw_url) if raw_url else (None, ())
+
+    raw_args = tuple(str(a) for a in cfg["args"]) if isinstance(
+        cfg.get("args"), (list, tuple)) else ()
+    safe_args, argv_secret_keys = scrub_argv_with_keys(cfg.get("args"))
+
     return ServerSpec(
         name=name,
         transport=transport,
         origin=origin,
         command=str(cfg["command"]) if cfg.get("command") else None,
-        args=scrub_argv(cfg.get("args")),
-        url=str(cfg["url"]) if cfg.get("url") else None,
+        args=safe_args,
+        url=safe_url,
         env_keys=env_keys,
         header_keys=hdr_keys,
-        credential_keys=tuple(sorted(set(env_secrets) | set(hdr_secrets))),
+        # A credential in a URL is still a credential the server carries, so
+        # it belongs in credential_keys — that is what raises
+        # `server.carries_credentials` and what makes delegation.py classify
+        # the server as own_credential rather than as an unknown.
+        credential_keys=tuple(sorted(
+            set(env_secrets) | set(hdr_secrets) | set(url_secret_keys)
+            | set(argv_secret_keys))),
         declared_authz=declared_authz,
+        connect_url=raw_url,
+        connect_args=raw_args,
     )
 
 

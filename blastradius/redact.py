@@ -113,31 +113,156 @@ def scrub(value: object, _depth: int = 0) -> object:
     return value
 
 
-def scrub_argv(args: object) -> tuple[str, ...]:
-    """Scrub a command argv.
+#: Flags whose *next* argv element is a value, regardless of what the flag
+#: itself is called. ``-H`` and ``-e`` carry no sensitive needle, but
+#: ``-H 'Authorization: Bearer ...'`` and ``-e GITHUB_TOKEN=ghp_...`` are how
+#: mcp-remote and docker-based MCP servers actually pass credentials.
+_VALUE_CARRYING_FLAGS: frozenset[str] = frozenset({
+    "-h", "--header", "-e", "--env", "--data", "-d", "--url", "-u",
+    "--user", "--password-stdin", "--arg", "--set",
+})
 
-    Secrets reach argv two ways and both are handled:
-      ``--token=abc``      -> ``--token=<redacted>``
-      ``--token`` ``abc``  -> ``--token`` ``<redacted>``
+_URL_WITH_USERINFO = re.compile(r"^[a-z][a-z0-9+.-]*://[^/\s@]+@", re.I)
+
+
+def scrub_url(url: object) -> tuple[str, tuple[str, ...]]:
+    """Strip credentials out of a URL. Returns ``(safe_url, key_names)``.
+
+    Two shapes carry secrets and neither has a config key to match on, which
+    is why key-name redaction alone never saw them:
+
+      ``https://host/mcp?api_key=SECRET``  -> ``?api_key=<redacted>``
+      ``https://user:SECRET@host/mcp``     -> ``https://user@host/mcp``
+
+    The returned key names are folded into ``ServerSpec.credential_keys`` so
+    the server is correctly reported as carrying a credential — which also
+    restores its ``own_credential`` delegation classification.
+    """
+    if not isinstance(url, str) or "://" not in url:
+        return (str(url) if url is not None else "", ())
+
+    from urllib.parse import parse_qsl, urlsplit, urlunsplit
+
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return (REDACTED, ("<unparseable-url>",))
+
+    found: list[str] = []
+    netloc = parts.netloc
+    if "@" in netloc:
+        userinfo, _, hostpart = netloc.rpartition("@")
+        user, sep, _password = userinfo.partition(":")
+        if sep:
+            found.append("<url-password>")
+            netloc = f"{user}@{hostpart}"
+        else:
+            netloc = f"{user}@{hostpart}"
+
+    query = parts.query
+    if query:
+        pairs = parse_qsl(query, keep_blank_values=True)
+        if pairs:
+            rebuilt = []
+            for k, v in pairs:
+                if v and looks_sensitive(k):
+                    found.append(k)
+                    rebuilt.append(f"{k}={REDACTED}")
+                else:
+                    rebuilt.append(f"{k}={v}" if v or "=" in query else k)
+            query = "&".join(rebuilt)
+
+    return (urlunsplit((parts.scheme, netloc, parts.path, query, parts.fragment)),
+            tuple(found))
+
+
+def scrub_argv(args: object) -> tuple[str, ...]:
+    """Scrub a command argv. See :func:`scrub_argv_with_keys`."""
+    return scrub_argv_with_keys(args)[0]
+
+
+def scrub_argv_with_keys(args: object) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Scrub a command argv, and name the credentials found in it.
+
+    Redaction is keyed on the *token*, not only on a preceding flag, because
+    the flag-anchored approach cannot be completed: a positional connection
+    string (``postgresql://svc:PASSWORD@db/prod``) has no flag in front of it
+    at all. Four shapes are handled:
+
+      ``--token=abc``                 -> ``--token=<redacted>``
+      ``--token`` ``abc``             -> ``--token`` ``<redacted>``
+      ``-H`` ``Authorization: Bearer`` -> ``-H`` ``Authorization: <redacted>``
+      ``postgres://u:pw@h/db``        -> ``postgres://u@h/db``
+
+    Returns ``(scrubbed_argv, key_names)``. The key names matter as much as
+    the scrubbing: a credential passed in argv is authority the server carries
+    on every call, so it has to reach ``credential_keys`` or the server is
+    classified as having no static credential and its confused-deputy posture
+    is understated.
     """
     if not isinstance(args, (list, tuple)):
-        return ()
+        return ((), ())
+    found: list[str] = []
     out: list[str] = []
-    redact_next = False
+    # None | "full" | "structural". A flag whose *name* is sensitive
+    # (``--token``) makes its whole value a secret. A merely value-carrying
+    # flag (``-H``) does not: ``-H 'Authorization: Bearer x'`` should keep the
+    # header name, which is a blast-radius fact, and drop only the value.
+    pending: str | None = None
+    pending_name: str | None = None
     for raw in args:
         arg = str(raw)
-        if redact_next:
-            out.append(REDACTED)
-            redact_next = False
+        if pending:
+            if pending == "full":
+                out.append(REDACTED)
+                found.append(pending_name or "<argv>")
+            else:
+                scrubbed, keys = _scrub_token_with_keys(arg)
+                out.append(scrubbed)
+                found.extend(keys)
+            pending = None
+            pending_name = None
             continue
         if "=" in arg and arg.startswith("-"):
             flag, _, _value = arg.partition("=")
             if looks_sensitive(flag.lstrip("-")):
                 out.append(f"{flag}={REDACTED}")
+                found.append(flag.lstrip("-"))
                 continue
-        if arg.startswith("-") and looks_sensitive(arg.lstrip("-")):
-            out.append(arg)
-            redact_next = True
-            continue
-        out.append(arg)
-    return tuple(out)
+        if arg.startswith("-"):
+            if looks_sensitive(arg.lstrip("-")):
+                out.append(arg)
+                pending, pending_name = "full", arg.lstrip("-")
+                continue
+            if arg.lower() in _VALUE_CARRYING_FLAGS:
+                out.append(arg)
+                pending = "structural"
+                continue
+        scrubbed, keys = _scrub_token_with_keys(arg)
+        out.append(scrubbed)
+        found.extend(keys)
+    return tuple(out), tuple(sorted(set(found)))
+
+
+def _scrub_token(arg: str) -> str:
+    return _scrub_token_with_keys(arg)[0]
+
+
+def _scrub_token_with_keys(arg: str) -> tuple[str, tuple[str, ...]]:
+    """Structural scrub of a single argv element, with no flag context.
+
+    Handles ``NAME=value``, ``Header: value`` and URLs carrying credentials.
+    """
+    if "://" in arg:
+        safe, keys = scrub_url(arg)
+        if safe != arg:
+            return safe, keys
+    if ": " in arg:
+        name, _, _value = arg.partition(": ")
+        if looks_sensitive(name):
+            return f"{name}: {REDACTED}", (name,)
+    if "=" in arg and not arg.startswith("-"):
+        name, _, value = arg.partition("=")
+        if value and looks_sensitive(name):
+            return f"{name}={REDACTED}", (name,)
+    return arg, ()
