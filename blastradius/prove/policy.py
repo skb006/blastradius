@@ -40,6 +40,10 @@ class DenyRule:
     from_pattern: str
     to_pattern: str
     capability: Capability = "any"
+    #: ``any`` flags reach however it is obtained. ``direct`` flags only reach
+    #: that needs no delegation — use it when delegated access is acceptable
+    #: but unbounded server authority is not.
+    delegation: Literal["any", "direct"] = "any"
 
     def matches_src(self, node_id: str) -> bool:
         return fnmatch.fnmatch(node_id, self.from_pattern)
@@ -54,6 +58,7 @@ class DenyRule:
         return {
             "name": self.name, "from": self.from_pattern,
             "to": self.to_pattern, "capability": self.capability,
+            "delegation": self.delegation,
         }
 
 
@@ -108,9 +113,14 @@ def parse_policy(doc: Any, source: str = "<policy>") -> Policy:
         dst = deny.get("to")
         if not isinstance(src, str) or not isinstance(dst, str):
             raise PolicyError(f"{source}: rules[{i}] needs string 'from' and 'to'")
+        deleg = str(deny.get("delegation", "any")).lower()
+        if deleg not in ("any", "direct"):
+            raise PolicyError(
+                f"{source}: rules[{i}] delegation must be any|direct, got {deleg!r}")
         rules.append(DenyRule(
             name=str(entry.get("name") or f"rule[{i}]"),
             from_pattern=src, to_pattern=dst, capability=cap,  # type: ignore[arg-type]
+            delegation=deleg,  # type: ignore[arg-type]
         ))
     return Policy(rules=rules)
 

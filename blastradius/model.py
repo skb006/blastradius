@@ -212,6 +212,24 @@ class ProbeResult:
     prompts: tuple[str, ...] = ()
     diagnostics: tuple[Diagnostic, ...] = ()
     duration_ms: int = 0
+    auth_challenge: str | None = None
+
+    @property
+    def requires_caller_token(self) -> bool:
+        """True when the server demands a per-caller token rather than
+        accepting a static shared secret.
+
+        Derived from the ``WWW-Authenticate`` challenge: under the MCP
+        authorization spec, a challenge pointing at protected-resource
+        metadata means OAuth, and OAuth means the caller's identity — not
+        the server's — decides what the request may do.
+        """
+        if not self.auth_challenge:
+            return False
+        low = self.auth_challenge.lower()
+        return "bearer" in low and (
+            "resource_metadata" in low or "as_uri" in low
+            or "authorization_uri" in low or "realm" in low)
 
     @property
     def recovered(self) -> bool:
@@ -231,6 +249,8 @@ class ProbeResult:
             "server_name": self.server_name,
             "server_version": self.server_version,
             "capabilities": list(self.capabilities),
+            "auth_challenge": self.auth_challenge,
+            "requires_caller_token": self.requires_caller_token,
             "tools": [t.to_json() for t in self.tools],
             "resources": [r.to_json() for r in self.resources],
             "prompts": list(self.prompts),

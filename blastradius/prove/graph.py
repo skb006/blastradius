@@ -28,6 +28,7 @@ from typing import Iterable, Literal, Sequence
 
 from ..creds.model import CredentialReport, Resolution
 from ..model import Origin, ProbeResult, ServerSpec
+from .delegation import DelegationMode, classify_server, is_confused_deputy
 
 NodeKind = Literal["agent", "server", "principal"]
 
@@ -35,6 +36,15 @@ NodeKind = Literal["agent", "server", "principal"]
 #: worth proving is "can this agent effect a write on that principal", and the
 #: specific tool and scope names ride along as witness evidence.
 Capability = Literal["read", "write"]
+
+#: Whether a hop can be taken on the caller's own authority (``direct``) or
+#: only under a delegation established upstream (``delegated``). A path that
+#: is reachable ``direct`` end to end spends authority nobody delegated —
+#: the confused deputy.
+Mode = Literal["direct", "delegated"]
+
+BOTH_MODES: frozenset[str] = frozenset({"direct", "delegated"})
+DELEGATED_ONLY: frozenset[str] = frozenset({"delegated"})
 
 AGENT_ID = "agent"
 
@@ -72,10 +82,16 @@ class Edge:
     evidence: str
     origin: Origin | None = None
     inferred: bool = False   # True when we assumed rather than observed
+    modes: frozenset[str] = BOTH_MODES
 
     @property
     def is_write(self) -> bool:
         return self.capability == "write"
+
+    @property
+    def allows_direct(self) -> bool:
+        """True if this hop can be taken without any delegation upstream."""
+        return "direct" in self.modes
 
 
 @dataclass
@@ -83,6 +99,8 @@ class AgentGraph:
     nodes: dict[str, Node] = field(default_factory=dict)
     edges: list[Edge] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
+    #: server name -> (how it obtains authority, why we think so)
+    delegation: dict[str, tuple[str, str]] = field(default_factory=dict)
 
     def add_node(self, node: Node) -> None:
         self.nodes.setdefault(node.id, node)
@@ -115,6 +133,8 @@ class AgentGraph:
                 for e in sorted(self.edges, key=lambda e: (e.src, e.dst, e.operation))
             ],
             "notes": list(self.notes),
+            "delegation": {k: {"mode": m, "reason": r}
+                           for k, (m, r) in sorted(self.delegation.items())},
         }
 
 
@@ -142,6 +162,8 @@ def build_graph(
         node = _server_node(spec)
         g.add_node(node)
         probe = probe_by_name.get(spec.name)
+        mode, reason = classify_server(spec, probe)
+        g.delegation[spec.name] = (mode, reason)
 
         if probe is not None and probe.recovered and probe.tools:
             for tool in probe.tools:
@@ -176,6 +198,11 @@ def build_graph(
         server_id = f"mcp:{res.ref.server_name}" if res.ref.server_name else None
         if server_id is None or server_id not in g.nodes:
             continue
+        mode, mode_reason = g.delegation.get(res.ref.server_name, ("unknown", ""))
+        # A server presenting its own static secret confers that authority on
+        # anyone who can call it — the hop needs no delegation. One that
+        # demands a caller token only works under a delegation.
+        edge_modes = BOTH_MODES if is_confused_deputy(mode) else DELEGATED_ONLY
 
         if res.is_inert:
             g.notes.append(
@@ -191,8 +218,8 @@ def build_graph(
             g.add_edge(Edge(
                 src=server_id, dst=pid, operation="<unresolved>", capability="write",
                 evidence=f"{res.ref.ident} carries {provider} authority of unknown "
-                         f"scope ({res.status})",
-                origin=res.ref.origin, inferred=True))
+                         f"scope ({res.status}); {mode_reason}",
+                origin=res.ref.origin, inferred=True, modes=edge_modes))
             continue
 
         pnode = _principal_node(res)
@@ -203,7 +230,7 @@ def build_graph(
                 src=server_id, dst=pnode.id, operation="*", capability="write",
                 evidence=f"{res.ref.ident} is live as {pnode.label}; issuer exposes "
                          f"no scope list, so reach is unbounded",
-                origin=res.ref.origin, inferred=True))
+                origin=res.ref.origin, inferred=True, modes=edge_modes))
             continue
 
         for scope in res.scopes:
@@ -211,7 +238,7 @@ def build_graph(
                 src=server_id, dst=pnode.id, operation=scope,
                 capability="write" if scope in WRITE_SCOPES else "read",
                 evidence=f"{res.ref.ident} grants scope {scope!r} as {pnode.label}",
-                origin=res.ref.origin,
+                origin=res.ref.origin, modes=edge_modes,
             ))
 
     return g

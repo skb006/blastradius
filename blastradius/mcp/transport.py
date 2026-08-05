@@ -39,7 +39,18 @@ class Unreachable(RuntimeError):
 
 
 class AuthRequired(RuntimeError):
-    """Reachable but refused: a surface exists, closed to us."""
+    """Reachable but refused: a surface exists, closed to us.
+
+    ``challenge`` carries the ``WWW-Authenticate`` header when the server
+    sent one. Under the MCP authorization spec a challenge naming a
+    protected-resource metadata URL means the server expects a *per-caller*
+    token, not a static shared secret — which is the difference between a
+    server that delegates and one that acts on its own authority.
+    """
+
+    def __init__(self, message: str, challenge: str | None = None) -> None:
+        super().__init__(message)
+        self.challenge = challenge
 
 
 class Transport(Protocol):  # pragma: no cover - structural
@@ -242,7 +253,10 @@ class HttpTransport:
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")[:300]
             if exc.code in (401, 403):
-                raise AuthRequired(f"HTTP {exc.code}: {detail}") from exc
+                challenge = None
+                if exc.headers:
+                    challenge = exc.headers.get("WWW-Authenticate")
+                raise AuthRequired(f"HTTP {exc.code}: {detail}", challenge) from exc
             if exc.code == 404:
                 raise Unreachable(f"HTTP 404 at {self._url}") from exc
             if exc.code == 405:

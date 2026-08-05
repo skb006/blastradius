@@ -43,8 +43,20 @@ from typing import Any
 
 from .graph import AgentGraph, Edge
 
-PORT_READ = 1
-PORT_WRITE = 2
+# (capability, mode) -> port. The mode dimension is what makes the confused
+# deputy provable: a path reachable in ``direct`` mode spends authority that
+# no hop derived from the caller's identity.
+PORT = {
+    ("read", "direct"): 1,
+    ("write", "direct"): 2,
+    ("read", "delegated"): 3,
+    ("write", "delegated"): 4,
+}
+PORT_READ = PORT[("read", "direct")]
+PORT_WRITE = PORT[("write", "direct")]
+
+#: Retained for callers that only care about capability; direct mode is the
+#: default question because it is the one that exposes unbounded authority.
 CAPABILITY_PORT = {"read": PORT_READ, "write": PORT_WRITE}
 
 POLICY_DEVICE = "agent-policy"
@@ -151,8 +163,11 @@ def encode(graph: AgentGraph) -> Encoding:
             # hop admit this capability?". reach_multi_hop then accepts a path
             # exactly when EVERY hop on it admits the capability — which is
             # the composition rule blast radius needs.
-            ports = ([pr(PORT_READ, PORT_READ), pr(PORT_WRITE, PORT_WRITE)]
-                     if edge.is_write else [pr(PORT_READ, PORT_READ)])
+            # write implies read within a mode; the modes an edge admits come
+            # from how the hop obtains its authority.
+            caps = ("read", "write") if edge.is_write else ("read",)
+            ports = [pr(PORT[(c, m)], PORT[(c, m)])
+                     for m in sorted(edge.modes) for c in caps]
             rules.append(seg["Rule"](
                 action="accept",
                 proto="tcp",

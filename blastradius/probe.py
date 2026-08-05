@@ -152,11 +152,19 @@ def probe_server(
                 prompts=prompts,
             )
     except AuthRequired as exc:
+        challenge = getattr(exc, "challenge", None)
         diags.append(
             Diagnostic("info", "probe.auth_required",
                        f"reachable but refused ({exc}); surface exists, scope unknown",
                        spec.origin))
-        return finish("auth_required")
+        if challenge:
+            diags.append(Diagnostic(
+                "info", "probe.caller_token_required",
+                f"'{spec.name}' challenges with {challenge!r} — it expects a "
+                f"per-caller token, so its authority is bounded by the caller "
+                f"rather than held by the server",
+                spec.origin))
+        return finish("auth_required", auth_challenge=challenge)
     except TimeoutError as exc:
         diags.append(Diagnostic("warn", "probe.timeout", str(exc), spec.origin))
         return finish("timeout")

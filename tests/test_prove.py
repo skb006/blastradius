@@ -166,7 +166,8 @@ def test_violation_diagnostic_flags_inferred_hops():
     s = server()
     g = build_graph([s], [probe(s, status="auth_required")], creds())
     report = prove(g, write_policy())
-    d = next(d for d in report.diagnostics if d.code == "prove.policy_violation")
+    d = next(d for d in report.diagnostics
+             if d.code in ("prove.confused_deputy", "prove.delegated_reach"))
     assert "assumed rather than observed" in d.message
 
 

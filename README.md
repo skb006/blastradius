@@ -19,14 +19,15 @@ organisations with bad models.**
 
 ## Status
 
-All four stages. It answers *"what can this agent actually reach, and can you
-prove it can't reach the rest?"*
+All five stages. It answers *"what can this agent actually reach, on whose
+authority, and can you prove it can't reach the rest?"*
 
 ```
-stage 1  parse configs      ->  what is declared      [done]
-stage 2  handshake + sweep  ->  what is running       [done]
-stage 3  resolve creds      ->  what it authorises    [done]
-stage 4  prove reach        ->  blast radius          [done]
+stage 1  parse configs      ->  what is declared           [done]
+stage 2  handshake + sweep  ->  what is running            [done]
+stage 3  resolve creds      ->  what it authorises         [done]
+stage 4  prove reach        ->  blast radius               [done]
+stage 5  delegation state   ->  whose authority is spent   [done]
 ```
 
 ## Install
@@ -269,9 +270,86 @@ The components that read credentials keep their zero-dependency guarantee; the
 one that does arithmetic on an already-collected inventory, and touches no
 secrets, is where a dependency is acceptable.
 
+## Stage 5: whose authority is being spent
+
+Reachability is only half the question. The half that decides whether a
+deployment is defensible is *on whose authority* the agent acts when it gets
+there.
+
+```
+mode              what it means                              verdict
+own_credential    server holds a static secret and presents  confused deputy
+                  it whoever called                          
+caller_token      server demands a per-caller token, so      bounded
+                  authority is the caller's own              
+unknown           we could not tell                          counted as deputy
+```
+
+Two structurally identical paths — same tool, same scope, same capability —
+separate cleanly:
+
+```
+CONFUSED DEPUTY - authority spent that nobody delegated
+  [!!] agent can WRITE principal:github:octocat with NO delegation
+       1. agent --[create_issue]--> mcp:github-static
+       2. mcp:github-static --[repo]--> principal:github:octocat
+
+DELEGATED REACH - bounded by the caller's own rights
+  [ !] agent can WRITE principal:github:caller only under a delegation
+```
+
+The first is the finding worth paging someone about: a hijacked agent inherits
+the *server's* rights. The second is a deployment doing it correctly — the
+agent can only ever spend what its own caller already had.
+
+### How delegation is proved
+
+`WWW-Authenticate` is captured on the 401 during stage 2 (the MCP authorization
+spec puts `resource_metadata` there), surfaced as `ProbeResult.auth_challenge`,
+and classified in `prove/delegation.py`.
+
+**Config wins over the challenge.** We probe unauthenticated, so a 401 only says
+"some token is required". If the configuration supplies a static one, that is
+what the server presents and the caller's identity never enters the request.
+Checking the challenge first would let a server with a hardcoded secret
+masquerade as delegating. This ordering is also the conservative one, so
+correctness and over-approximation agree.
+
+The reachability question is then asked twice, in two capability dimensions:
+
+```python
+PORT = {("read", "direct"): 1, ("write", "direct"): 2,
+        ("read", "delegated"): 3, ("write", "delegated"): 4}
+```
+
+A path reachable in the **direct** dimension needs no delegation at any hop —
+anyone who can call the server inherits its authority, proven, with a witness.
+A path reachable only in the **delegated** dimension has a real authority
+boundary. `direct` is asked first because it is the stronger claim.
+
+Policies can act on the distinction:
+
+```yaml
+- name: unbounded server authority is unacceptable
+  deny: {from: agent, to: "principal:*", capability: write, delegation: direct}
+```
+
+`delegation: direct` flags only reach that needs no delegation, which is the
+right rule for a deployment that has accepted delegated access but not
+confused deputies.
+
+When *no* server anywhere derives authority from its caller, that is stated
+once as a deployment-wide fact (`prove.no_delegation_boundary`) rather than
+repeated per finding.
+
+This is segval's conntrack semantics wearing different clothes: a hop is
+admissible only because an earlier hop established the right to take it. It is
+encoded in the port dimension rather than `Query.state` because `state` exists
+on only some segval revisions — see the boundary-adaptation note above.
+
 ## Next
 
-Delegation state. segval's `derive_sessions()` models conntrack — a token valid
-at hop N *only because of* hop N−1 — which is the same semantics as a delegation
-chain. Wiring it in turns the current "can reach" into "can reach while acting
-on behalf of", and is the piece a competitor would find hardest to replicate.
+Merge the segval branch divergence (`Query.state`, the iptables parser, parse
+diagnostics) onto sound `main`, and decide deliberately whether the prober
+should read `/proc/<pid>/environ` to see an agent's true surface — that has a
+privacy dimension, not just a capability one.

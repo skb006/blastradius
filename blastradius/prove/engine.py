@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 from typing import Any, Sequence
 
 from ..model import Diagnostic
-from .encode import CAPABILITY_PORT, Encoding, decode_edge, encode
+from .encode import PORT, Encoding, decode_edge, encode
 from .graph import AgentGraph, Edge
 from .policy import DenyRule, Policy
 
@@ -53,6 +53,13 @@ class Verdict:
     reachable: bool
     witness: tuple[Hop, ...] = ()
     note: str = ""
+    #: "direct" means the path needs no delegation at any hop — the caller
+    #: spends authority nobody granted it. That is the confused deputy.
+    mode: str = "direct"
+
+    @property
+    def confused_deputy(self) -> bool:
+        return self.reachable and self.mode == "direct"
 
     @property
     def violates(self) -> bool:
@@ -62,6 +69,7 @@ class Verdict:
         return {
             "rule": self.rule_name, "src": self.src, "dst": self.dst,
             "capability": self.capability, "reachable": self.reachable,
+            "mode": self.mode, "confused_deputy": self.confused_deputy,
             "violates": self.violates,
             "witness": [h.to_json() for h in self.witness],
             "note": self.note,
@@ -119,7 +127,8 @@ def _witness_from_decision(decision: Any, encoding: Encoding) -> tuple[Hop, ...]
     return tuple(hops)
 
 
-def _build_query(encoding: Encoding, src: str, dst: str, capability: str) -> Any:
+def _build_query(encoding: Encoding, src: str, dst: str, capability: str,
+                 mode: str = "direct") -> Any:
     """Construct a segval Query, tolerating the branch divergence in its shape.
 
     ``Query.state`` exists on some segval revisions and not others (the two
@@ -136,7 +145,7 @@ def _build_query(encoding: Encoding, src: str, dst: str, capability: str) -> Any
         "dst_zone": encoding.zone(dst),
         "dst_ip": encoding.address(dst),
         "proto": "tcp",
-        "dst_port": CAPABILITY_PORT[capability],
+        "dst_port": PORT[(capability, mode)],
     }
     if any(f.name == "state" for f in dataclasses.fields(Query)):
         # v1 reasons about direct invocation only; delegation state is stage 5.
@@ -144,10 +153,12 @@ def _build_query(encoding: Encoding, src: str, dst: str, capability: str) -> Any
     return Query(**kwargs)
 
 
-def _ask(encoding: Encoding, src: str, dst: str, capability: str) -> Any:
+def _ask(encoding: Encoding, src: str, dst: str, capability: str,
+         mode: str = "direct") -> Any:
     from segval.engine.evaluator import reach_multi_hop
 
-    return reach_multi_hop(encoding.network, _build_query(encoding, src, dst, capability))
+    return reach_multi_hop(
+        encoding.network, _build_query(encoding, src, dst, capability, mode))
 
 
 def prove(graph: AgentGraph, policy: Policy) -> ProofReport:
@@ -179,26 +190,83 @@ def prove(graph: AgentGraph, policy: Policy) -> ProofReport:
                 if src == dst:
                     continue
                 for capability in rule.capabilities():
-                    decision = _ask(encoding, src, dst, capability)
-                    reachable = bool(getattr(decision, "allowed", False))
-                    report.verdicts.append(Verdict(
-                        rule_name=rule.name,
-                        src=src, dst=dst, capability=capability,
-                        reachable=reachable,
-                        witness=_witness_from_decision(decision, encoding)
-                        if reachable else (),
-                        note="" if reachable else
-                             "no path admits this capability under the discovered grants",
-                    ))
+                    report.verdicts.append(
+                        _answer(encoding, rule, src, dst, capability))
 
     for v in report.violations:
         inferred = [h for h in v.witness if h.inferred]
-        report.diagnostics.append(Diagnostic(
-            "error", "prove.policy_violation",
-            f"{v.rule_name!r}: {v.src} can {v.capability} {v.dst} "
-            f"in {len(v.witness)} hop(s)"
-            + (f" — {len(inferred)} hop(s) assumed rather than observed"
-               if inferred else ""),
-        ))
+        suffix = (f" — {len(inferred)} hop(s) assumed rather than observed"
+                  if inferred else "")
+        if v.confused_deputy:
+            report.diagnostics.append(Diagnostic(
+                "error", "prove.confused_deputy",
+                f"{v.rule_name!r}: {v.src} can {v.capability} {v.dst} in "
+                f"{len(v.witness)} hop(s) WITHOUT any delegation — the authority "
+                f"belongs to the server, so every caller inherits it" + suffix,
+            ))
+        else:
+            report.diagnostics.append(Diagnostic(
+                "warn", "prove.delegated_reach",
+                f"{v.rule_name!r}: {v.src} can {v.capability} {v.dst}, but only "
+                f"under a delegation — authority stays bounded by the caller"
+                + suffix,
+            ))
 
+    _summarise_delegation(graph, report)
     return report
+
+
+def _answer(
+    encoding: Encoding, rule: DenyRule, src: str, dst: str, capability: str
+) -> Verdict:
+    """Ask direct first, then delegated, and report the strongest mode.
+
+    Direct is asked first because it is the stronger claim: a hop that needs
+    no delegation is reachable by *anyone* who can call the server. An edge
+    that admits direct also admits delegated, so asking both and reporting
+    both would just be the same finding twice.
+    """
+    modes = ("direct",) if rule.delegation == "direct" else ("direct", "delegated")
+
+    for mode in modes:
+        decision = _ask(encoding, src, dst, capability, mode)
+        if bool(getattr(decision, "allowed", False)):
+            return Verdict(
+                rule_name=rule.name, src=src, dst=dst, capability=capability,
+                reachable=True, mode=mode,
+                witness=_witness_from_decision(decision, encoding),
+            )
+
+    unreached = ("no path admits this capability without a delegation"
+                 if rule.delegation == "direct" else
+                 "no path admits this capability under the discovered grants")
+    return Verdict(
+        rule_name=rule.name, src=src, dst=dst, capability=capability,
+        reachable=False, mode=modes[-1], note=unreached,
+    )
+
+
+def _summarise_delegation(graph: AgentGraph, report: ProofReport) -> None:
+    """State the deployment-wide delegation posture.
+
+    When no server anywhere derives its authority from the caller, that is a
+    single fact worth saying once rather than repeating per finding: the
+    deployment has no delegation boundary at all.
+    """
+    if not graph.delegation:
+        return
+    modes = {name: mode for name, (mode, _) in graph.delegation.items()}
+    delegating = [n for n, m in modes.items() if m == "caller_token"]
+    if not delegating:
+        report.diagnostics.append(Diagnostic(
+            "error", "prove.no_delegation_boundary",
+            f"none of the {len(modes)} server(s) derives authority from the "
+            f"caller — every one presents its own credential, so there is no "
+            f"delegation boundary anywhere in this deployment",
+        ))
+    else:
+        report.diagnostics.append(Diagnostic(
+            "info", "prove.delegation_boundary",
+            f"{len(delegating)}/{len(modes)} server(s) require a per-caller "
+            f"token: {', '.join(sorted(delegating))}",
+        ))

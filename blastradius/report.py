@@ -203,6 +203,14 @@ def render_graph(graph) -> str:
         flag = "W" if e.is_write else "r"
         tag = " (assumed)" if e.inferred else ""
         out.append(f"  [{flag}] {e.src} --[{e.operation}]--> {e.dst}{tag}")
+    if graph.delegation:
+        out.append("")
+        out.append("  delegation posture:")
+        for name, (mode, reason) in sorted(graph.delegation.items()):
+            flag = "!!" if mode == "own_credential" else (
+                "ok" if mode == "caller_token" else " ?")
+            out.append(f"    [{flag}] {name}: {mode}")
+            out.append(f"         {reason}")
     for note in graph.notes:
         out.append(f"  note: {note}")
     return "\n".join(out)
@@ -221,11 +229,15 @@ def render_proof(report) -> str:
         out.append("  nothing to prove — no grants discovered")
         return "\n".join(out)
 
-    if report.violations:
+    deputies = [v for v in report.violations if v.confused_deputy]
+    delegated = [v for v in report.violations if not v.confused_deputy]
+
+    if deputies:
         out.append("")
-        out.append("  VIOLATIONS")
-        for v in report.violations:
-            out.append(f"    [!!] {v.src} can {v.capability.upper()} {v.dst}")
+        out.append("  CONFUSED DEPUTY — authority spent that nobody delegated")
+        for v in deputies:
+            out.append(f"    [!!] {v.src} can {v.capability.upper()} {v.dst} "
+                       f"with NO delegation")
             out.append(f"         rule: {v.rule_name}")
             for i, hop in enumerate(v.witness, 1):
                 tag = "  (assumed, not observed)" if hop.inferred else ""
@@ -234,6 +246,16 @@ def render_proof(report) -> str:
                 out.append(f"            {hop.evidence}")
                 if hop.origin:
                     out.append(f"            declared at {hop.origin}")
+
+    if delegated:
+        out.append("")
+        out.append("  DELEGATED REACH — bounded by the caller's own rights")
+        for v in delegated:
+            out.append(f"    [ !] {v.src} can {v.capability.upper()} {v.dst} "
+                       f"only under a delegation")
+            out.append(f"         rule: {v.rule_name}")
+            for i, hop in enumerate(v.witness, 1):
+                out.append(f"         {i}. {hop.src} --[{hop.operation}]--> {hop.dst}")
 
     if report.proofs_of_absence:
         out.append("")
@@ -244,7 +266,7 @@ def render_proof(report) -> str:
     s = report.to_json()["summary"]
     out.append("")
     out.append(f"  {s['questions_asked']} question(s): "
-               f"{s['violations']} violation(s), "
+               f"{len(deputies)} confused deputy, {len(delegated)} delegated, "
                f"{s['proven_unreachable']} proven unreachable")
     if report.graph_notes:
         out.append("")
