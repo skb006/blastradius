@@ -191,3 +191,64 @@ def render_credentials(report: CredentialReport) -> str:
     out.append(f"  {s['credentials_found']} credential(s): "
                f"{s['resolved']} resolved, {s['inert']} inert")
     return "\n".join(out)
+
+
+def render_graph(graph) -> str:
+    """The assembled agent graph, for eyeballing before trusting a proof."""
+    out = ["AGENT GRAPH", "=" * 68]
+    for node in sorted(graph.nodes.values(), key=lambda n: (n.kind, n.id)):
+        out.append(f"  [{node.kind:>9}] {node.id}")
+    out.append("")
+    for e in sorted(graph.edges, key=lambda e: (e.src, e.dst, e.operation)):
+        flag = "W" if e.is_write else "r"
+        tag = " (assumed)" if e.inferred else ""
+        out.append(f"  [{flag}] {e.src} --[{e.operation}]--> {e.dst}{tag}")
+    for note in graph.notes:
+        out.append(f"  note: {note}")
+    return "\n".join(out)
+
+
+def render_proof(report) -> str:
+    """Violations with witnesses, and proofs of absence stated explicitly.
+
+    Absence gets its own section on purpose. A tool that only ever prints
+    findings teaches its users that silence means "not checked" — and the
+    proof that something is unreachable is the artifact an auditor wants.
+    """
+    out = ["BLAST RADIUS", "=" * 68]
+
+    if not report.verdicts:
+        out.append("  nothing to prove — no grants discovered")
+        return "\n".join(out)
+
+    if report.violations:
+        out.append("")
+        out.append("  VIOLATIONS")
+        for v in report.violations:
+            out.append(f"    [!!] {v.src} can {v.capability.upper()} {v.dst}")
+            out.append(f"         rule: {v.rule_name}")
+            for i, hop in enumerate(v.witness, 1):
+                tag = "  (assumed, not observed)" if hop.inferred else ""
+                out.append(f"         {i}. {hop.src} --[{hop.operation}]--> "
+                           f"{hop.dst}{tag}")
+                out.append(f"            {hop.evidence}")
+                if hop.origin:
+                    out.append(f"            declared at {hop.origin}")
+
+    if report.proofs_of_absence:
+        out.append("")
+        out.append("  PROVEN UNREACHABLE")
+        for v in report.proofs_of_absence:
+            out.append(f"    [ok] {v.src} cannot {v.capability.upper()} {v.dst}")
+
+    s = report.to_json()["summary"]
+    out.append("")
+    out.append(f"  {s['questions_asked']} question(s): "
+               f"{s['violations']} violation(s), "
+               f"{s['proven_unreachable']} proven unreachable")
+    if report.graph_notes:
+        out.append("")
+        out.append("  graph assumptions:")
+        for n in report.graph_notes:
+            out.append(f"    - {n}")
+    return "\n".join(out)

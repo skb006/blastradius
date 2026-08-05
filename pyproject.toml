@@ -14,6 +14,11 @@ dependencies = []
 
 [project.optional-dependencies]
 dev = ["pytest>=8"]
+# Stage 4 only. Kept OUT of the base install on purpose: the components that
+# read credentials ship no supply chain, and the prover — which touches an
+# already-collected inventory and no secrets — is where a dependency is
+# acceptable. segval is not on PyPI; install from source.
+prove = ["segval @ git+https://github.com/skb006/segval.git"]
 
 [project.scripts]
 blastradius = "blastradius.cli:main"

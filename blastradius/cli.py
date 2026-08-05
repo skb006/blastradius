@@ -14,6 +14,7 @@ the exact failure mode this tool exists to prevent.
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 import tempfile
 from pathlib import Path
@@ -22,6 +23,9 @@ from typing import Sequence
 from .creds.model import CredentialReport
 from .creds.resolve import analyse
 from .discovery import discover
+from .prove.engine import prove as run_prover
+from .prove.graph import build_graph as build_agent_graph
+from .prove.policy import PolicyError, default_policy, load_policy
 from .model import Diagnostic, Inventory, ProbeResult
 from .probe import probe_all
 from .sweep import sweep
@@ -83,6 +87,25 @@ def build_parser() -> argparse.ArgumentParser:
     pr.add_argument("--only", action="append", default=[], metavar="NAME",
                     help="probe only these server names (repeatable)")
     pr.add_argument("-v", "--verbose", action="store_true", help="list every tool")
+
+    pv = sub.add_parser(
+        "prove", help="prove what the agent can reach, or that it cannot")
+    _add_common(pv)
+    pv.add_argument("--policy", type=Path, default=None, metavar="FILE",
+                    help="policy file (.json/.yaml). Without one, a conservative "
+                         "default denies all agent write authority.")
+    pv.add_argument("--allow-spawn", action="store_true",
+                    help="permit spawning stdio servers while collecting the surface")
+    pv.add_argument("--sweep", action="store_true",
+                    help="include undeclared listening MCP servers")
+    pv.add_argument("--no-remote", action="store_true",
+                    help="probe only loopback endpoints")
+    pv.add_argument("--resolve-credentials", action="store_true",
+                    help="ask issuers what each credential authorises — without "
+                         "this, credential authority is treated as unbounded")
+    pv.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT, metavar="SEC")
+    pv.add_argument("--show-graph", action="store_true",
+                    help="print the assembled agent graph")
     return p
 
 
@@ -168,6 +191,59 @@ def cmd_probe(args: argparse.Namespace) -> int:
     return _exit_code(all_diags)
 
 
+def cmd_prove(args: argparse.Namespace) -> int:
+    """Collect the surface, assemble the graph, discharge the policy."""
+    from .prove.encode import SegvalUnavailable
+    from .report import render_graph, render_proof
+
+    inv = _collect(args)
+    specs = inv.probe_targets()
+    results = probe_all(specs, allow_spawn=args.allow_spawn,
+                        allow_remote=not args.no_remote, timeout=args.timeout)
+    if args.sweep:
+        swept, sweep_diags = sweep(specs, timeout=min(args.timeout, 3.0))
+        results.extend(swept)
+        inv.diagnostics.extend(sweep_diags)
+
+    creds = analyse(inv.deduped(), resolve=args.resolve_credentials,
+                    timeout=args.timeout)
+
+    try:
+        policy = load_policy(args.policy) if args.policy else default_policy()
+    except PolicyError as exc:
+        print(f"policy error: {exc}", file=sys.stderr)
+        return 2
+
+    graph = build_agent_graph(inv.deduped(), results, creds)
+    try:
+        report = run_prover(graph, policy)
+    except SegvalUnavailable as exc:
+        print(f"{exc}", file=sys.stderr)
+        return 2
+
+    all_diags = (list(inv.diagnostics)
+                 + [d for r in results for d in r.diagnostics]
+                 + list(creds.diagnostics)
+                 + [d for r in creds.resolutions for d in r.diagnostics]
+                 + list(report.diagnostics))
+
+    if args.json:
+        payload = json.loads(to_json(inv, results, creds))
+        payload["schema"] = "blastradius/prove/v1"
+        payload["graph"] = graph.to_json()
+        payload["proof"] = report.to_json()
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        if args.show_graph:
+            _emit(render_graph(graph))
+            print()
+        _emit(render_proof(report))
+        if not args.quiet:
+            print()
+            print(render_diagnostics(all_diags))
+    return _exit_code(all_diags)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
@@ -175,6 +251,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return cmd_discover(args)
         if args.command == "probe":
             return cmd_probe(args)
+        if args.command == "prove":
+            return cmd_prove(args)
     except KeyboardInterrupt:  # pragma: no cover
         print("\ninterrupted", file=sys.stderr)
         return 130

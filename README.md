@@ -19,16 +19,14 @@ organisations with bad models.**
 
 ## Status
 
-Stage 3 of 4. This repo answers *"what MCP servers exist here, what can they
-actually do, and whose authority do they carry?"* It does not yet compute
-reachability — that lands when the [segval](https://github.com/skb006/segval)
-prover is wired in.
+All four stages. It answers *"what can this agent actually reach, and can you
+prove it can't reach the rest?"*
 
 ```
 stage 1  parse configs      ->  what is declared      [done]
 stage 2  handshake + sweep  ->  what is running       [done]
-stage 3  resolve creds      ->  what it authorises    [done]  <- you are here
-stage 4  prove reach        ->  blast radius          [next]
+stage 3  resolve creds      ->  what it authorises    [done]
+stage 4  prove reach        ->  blast radius          [done]
 ```
 
 ## Install
@@ -54,6 +52,9 @@ blastradius probe --classify-credentials
 
 # ask each issuer what its credential authorises, over a pinned host
 blastradius probe --resolve-credentials
+
+# prove it: collect the surface, then discharge a policy against it
+blastradius prove --sweep --resolve-credentials --policy policy.yaml
 
 # CI-safe: no remote egress, no code execution, machine-readable
 blastradius probe --no-remote --json > agent-surface.json
@@ -138,7 +139,7 @@ diffed; two runs against an unchanged deployment must diff to nothing.
 ## Tests
 
 ```bash
-.venv/bin/python -m pytest -q     # 264 tests
+.venv/bin/python -m pytest -q     # 298 tests
 ```
 
 `filterwarnings = ["error"]` is on. It has already caught one real file
@@ -182,8 +183,95 @@ runtime is missing.
 harmless. AWS and OpenAI expose no scope introspection, so their reach is
 reported as unknown rather than empty.
 
+## Stage 4: the proof
+
+```
+BLAST RADIUS
+====================================================================
+
+  VIOLATIONS
+    [!!] agent can WRITE principal:github:octocat
+         rule: agent must not hold write authority over any external principal
+         1. agent --[create_issue]--> mcp:github
+            tool 'create_issue' exposed by github
+            declared at /cfg/.mcp.json#mcpServers.github
+         2. mcp:github --[repo]--> principal:github:octocat
+            github:GITHUB_TOKEN grants scope 'repo' as github:octocat
+            declared at /cfg/.mcp.json#mcpServers.github
+
+  PROVEN UNREACHABLE
+    [ok] agent cannot WRITE principal:slack:readbot
+
+  3 question(s): 2 violation(s), 1 proven unreachable
+```
+
+**Proofs of absence get their own section.** A tool that only ever prints
+findings teaches its users that silence means "not checked". The line saying
+the agent *cannot* write to Slack — because a read-only tool composed with a
+read-only scope admits no write path — is the artifact an auditor actually
+wants, and the one that is hard to get any other way.
+
+**Assumed hops are labelled.** Where the surface could not be observed, the
+witness says so, and the run lists its assumptions. A violation built entirely
+from assumptions is a prompt to go get better data, not a finding to act on.
+
+### Policy
+
+```yaml
+version: 1
+rules:
+  - name: agents must not write to production GitHub
+    deny:
+      from: agent
+      to: "principal:github:*"
+      capability: write
+```
+
+Without `--policy`, a conservative default denies all agent write authority —
+loud by design. Run it, look at what the agent can genuinely reach, then narrow.
+
+### How it is proved
+
+The prover is [segval](https://github.com/skb006/segval), a network
+segmentation prover, reused unmodified. **We do not fork it, we adapt at the
+boundary:**
+
+```
+node       -> zone (a synthetic /24)
+hop (u,v)  -> its own device, so each hop has its own filter
+capability -> destination port  (1 = read, 2 = write)
+grant      -> ACCEPT rule on that hop's device
+absence    -> the device's DROP default
+```
+
+The encoding preserves the machinery rather than weakening it: segval
+partitions the 5-tuple into atomic predicates, which under this mapping
+becomes a partition over (principal × resource × capability) — exactly what
+stage 4 needs. Soundness is inherited, not re-derived.
+
+Two encoding decisions were bought with bugs:
+
+**Capability, not operation, is the port.** A path has a different operation at
+each hop (`create_issue` then `repo`) and one 5-tuple cannot carry both. The
+capability class *is* uniform along the path, and is the thing worth proving.
+Tool and scope names ride along as witness evidence.
+
+**One device per hop.** A packet's addresses are constant end to end, so a rule
+cannot identify its hop by CIDR. An earlier encoding tried, the tool hop was
+silently ignored, and every graph looked violated — a prover that always says
+yes is worse than none, because it looks like it works.
+`test_read_only_tools_cannot_reach_write` pins this down.
+
+### Optional extra, on purpose
+
+`prove` needs segval, so it lives behind `pip install 'blastradius[prove]'`.
+The components that read credentials keep their zero-dependency guarantee; the
+one that does arithmetic on an already-collected inventory, and touches no
+secrets, is where a dependency is acceptable.
+
 ## Next
 
-Stage 4 — wire in the [segval](https://github.com/skb006/segval) prover and
-compute reachability over (principal × resource × operation), so the output
-becomes a witness path rather than an inventory.
+Delegation state. segval's `derive_sessions()` models conntrack — a token valid
+at hop N *only because of* hop N−1 — which is the same semantics as a delegation
+chain. Wiring it in turns the current "can reach" into "can reach while acting
+on behalf of", and is the piece a competitor would find hardest to replicate.

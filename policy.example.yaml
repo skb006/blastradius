@@ -1,0 +1,32 @@
+# Example blastradius policy.
+#
+# Each rule is a denial the prover must discharge: either it proves no path
+# exists, or it produces the path that violates it. Both outcomes are useful.
+#
+# from/to are shell globs over node ids:
+#   agent                          the AI agent itself
+#   mcp:<server-name>              an MCP server
+#   principal:<identity>           an identity a credential resolves to,
+#                                  e.g. principal:github:octocat
+#                                       principal:arn:aws:iam::123:role/deployer
+#
+# capability: read | write | any
+version: 1
+rules:
+  - name: agents must not hold write authority over source control
+    deny:
+      from: agent
+      to: "principal:github:*"
+      capability: write
+
+  - name: agents must not reach production AWS at all
+    deny:
+      from: agent
+      to: "principal:arn:aws:iam::*"
+      capability: any
+
+  - name: no agent may write to chat platforms
+    deny:
+      from: agent
+      to: "principal:slack:*"
+      capability: write
