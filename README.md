@@ -17,6 +17,71 @@ organisations with bad models.**
 
 ---
 
+## In plain words
+
+You give an AI agent tools and API keys so it can do useful work. Someone hides
+an instruction where the agent will read it — a web page, a GitHub issue, an
+email — and the agent obeys it. That is prompt injection, and most security
+products try to *detect* it.
+
+This one doesn't. It measures the damage instead, by answering a question that
+has an answer whether or not you spot the attack:
+
+**If this agent is hijacked right now, what exactly can it touch?**
+
+That question is about plumbing, not cleverness — which servers, which tools,
+which keys, which permissions. So it can be worked out and checked.
+
+Four steps:
+
+1. **Read the config files** to find which tool-servers the agent is wired to.
+2. **Check which are actually running.** This matters more than it sounds. On
+   the install this was built against, all 17 configured addresses were dead
+   and the live agent was listening on a port written down nowhere. Config
+   files describe sessions that already happened.
+3. **Ask each API key's issuer what it opens.** It asks GitHub "what does this
+   token do?" and GitHub answers `repo, workflow`, as user `octocat`. The key
+   is never stored, and it only ever goes to its own issuer — redirects and
+   proxies are refused, not followed.
+4. **Work out which paths connect end to end**, and print either the exact
+   chain or a proof that no chain exists.
+
+What comes out:
+
+```
+[!!] agent can WRITE principal:github:octocat with NO delegation
+     1. agent --[create_issue]--> mcp:github-static
+     2. mcp:github-static --[repo]--> principal:github:octocat
+
+[ok] agent cannot WRITE principal:slack:readbot
+```
+
+Two things about that are worth pointing at.
+
+**It can prove a negative.** Most security tools hand you a list of problems.
+This one can say *"this agent cannot reach production, and here is the
+reasoning"*. That is what an auditor actually asks for, and it is hard to get
+any other way.
+
+**It tells you whose permissions are being spent.** If a server holds its own
+admin key, everyone who can talk to it inherits admin — that is a confused
+deputy, and it is what most deployments do. If the server makes each caller
+bring their own credentials, a hijacked agent can only do what it was already
+allowed to do. Identical diagram, completely different risk. This separates
+them.
+
+### What it does not do
+
+- It runs **on the machine**. It cannot audit a deployment from the outside.
+- It only sees what it can reach. An unreachable server stays unknown.
+- It **deliberately overstates danger**: anything it cannot inspect counts as
+  fully write-capable. Understating blast radius is the one error worth
+  avoiding at any cost, so a first run is loud on purpose.
+- It is not a runtime guard. It changes nothing and blocks nothing; it tells
+  you what is true right now.
+
+---
+
 ## Status
 
 All five stages. It answers *"what can this agent actually reach, on whose
