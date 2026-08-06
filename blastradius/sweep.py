@@ -19,11 +19,18 @@ shadow agent, which is the finding the whole product is pointed at.
 
 Sweeping is opt-in. It sends one small JSON-RPC POST to local ports, and doing
 that uninvited is not a decision this tool makes on a user's behalf.
+
+The socket table is read from ``/proc/net/tcp``, so enumeration currently works
+on Linux only. Where no socket table is readable the sweep reports
+``sweep.unsupported_platform`` at error severity rather than returning an empty
+result, because an empty result is indistinguishable from a clean machine and
+this tool must never understate reach.
 """
 
 from __future__ import annotations
 
 import ipaddress
+import sys
 from pathlib import Path
 from typing import Iterable, Sequence
 
@@ -110,6 +117,24 @@ def listening_ports(proc_files: Sequence[Path] = _PROC_TCP) -> set[int]:
     return ports
 
 
+def port_source_available(proc_files: Sequence[Path] = _PROC_TCP) -> bool:
+    """True if at least one socket table is readable.
+
+    ``listening_ports`` cannot distinguish "nothing is listening" from "I have
+    no way to look" — both are the empty set. On a platform without ``/proc``
+    every read raises and the sweep quietly finds nothing, which reads as a
+    clean result. That is the one error this tool must never make, so the
+    caller asks this first and says so out loud.
+    """
+    for path in proc_files:
+        try:
+            with path.open("rb"):
+                return True
+        except OSError:
+            continue
+    return False
+
+
 def _candidate_specs(port: int) -> list[ServerSpec]:
     return [
         ServerSpec(
@@ -153,12 +178,28 @@ def sweep(
             except ValueError:
                 pass
 
-    candidates = set(ports) if ports is not None else listening_ports()
-    excluded = WELL_KNOWN_NON_HTTP | set(skip_ports)
-    targets = sorted(candidates - excluded)
-
     results: list[ProbeResult] = []
     diags: list[Diagnostic] = []
+
+    # Read _PROC_TCP through the module global rather than the def-time default
+    # so the source is substitutable at call time.
+    if ports is None and not port_source_available(_PROC_TCP):
+        tried = ", ".join(str(p) for p in _PROC_TCP)
+        diags.append(
+            Diagnostic(
+                "error", "sweep.unsupported_platform",
+                f"cannot enumerate listening sockets on {sys.platform}: no readable "
+                f"socket table (tried {tried}) — the sweep found nothing because it "
+                f"could not look, not because nothing is listening",
+            )
+        )
+        # Return before the liveness diff below: with no socket table, "none of
+        # the declared endpoints are listening" is not something we observed.
+        return results, diags
+
+    candidates = set(ports) if ports is not None else listening_ports(_PROC_TCP)
+    excluded = WELL_KNOWN_NON_HTTP | set(skip_ports)
+    targets = sorted(candidates - excluded)
 
     for port in targets:
         for spec in _candidate_specs(port):
