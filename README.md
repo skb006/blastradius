@@ -104,6 +104,9 @@ python -m venv .venv && .venv/bin/pip install -e ".[dev]"
 Zero runtime dependencies, deliberately. This tool reads live credentials, so
 it ships no supply chain of its own.
 
+**New here? [`GETTING_STARTED.md`](GETTING_STARTED.md)** is a ten-minute path
+from clone to a real report — every command verified on a clean checkout.
+
 ## Use
 
 ```bash
