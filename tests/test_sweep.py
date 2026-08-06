@@ -11,6 +11,7 @@ from blastradius.sweep import (
     WELL_KNOWN_NON_HTTP,
     _is_local_bind,
     listening_ports,
+    port_source_available,
     sweep,
 )
 
@@ -119,3 +120,72 @@ def test_all_declared_endpoints_dead_is_reported(http_server):
     _, diags = sweep(declared=[dead], ports=[live], timeout=3)
     d = next(d for d in diags if d.code == "sweep.all_declared_endpoints_dead")
     assert "past sessions, not current reach" in d.message
+
+
+# --- platforms with no readable socket table --------------------------------
+
+def test_port_source_available_detects_a_readable_table(tmp_path: Path):
+    f = tmp_path / "tcp"
+    f.write_text(PROC_TCP)
+    assert port_source_available([f]) is True
+    assert port_source_available([tmp_path / "nope", f]) is True
+
+
+def test_port_source_available_is_false_when_nothing_is_readable(tmp_path: Path):
+    assert port_source_available([tmp_path / "nope", tmp_path / "also-nope"]) is False
+
+
+def test_sweep_reports_error_when_it_cannot_enumerate(monkeypatch, tmp_path: Path):
+    """An empty sweep on a platform with no /proc must not read as clean.
+
+    This is the whole point: `listening_ports` returns the empty set both when
+    nothing is listening and when there is no way to look, so the sweep has to
+    say which one happened.
+    """
+    monkeypatch.setattr("blastradius.sweep._PROC_TCP", (tmp_path / "nope",))
+    results, diags = sweep(declared=[], timeout=1)
+    assert results == []
+    d = next(d for d in diags if d.code == "sweep.unsupported_platform")
+    assert d.severity == "error", "must be non-zero exit, not a quiet pass"
+    assert "could not look, not because nothing is listening" in d.message
+
+
+def test_sweep_without_socket_table_does_not_claim_declared_endpoints_are_dead(
+    monkeypatch, tmp_path: Path
+):
+    """Liveness is not something we observed if we could not read any sockets."""
+    monkeypatch.setattr("blastradius.sweep._PROC_TCP", (tmp_path / "nope",))
+    dead = ServerSpec(name="stale", transport="http", origin=Origin("<cfg>"),
+                      url="http://127.0.0.1:39765/mcp")
+    _, diags = sweep(declared=[dead], timeout=1)
+    assert not [d for d in diags if d.code == "sweep.all_declared_endpoints_dead"]
+
+
+def test_explicit_ports_still_sweep_without_a_socket_table(monkeypatch, tmp_path: Path,
+                                                          http_server):
+    """`ports=` is a caller-supplied list, so no enumeration is needed."""
+    monkeypatch.setattr("blastradius.sweep._PROC_TCP", (tmp_path / "nope",))
+    port = _port_of(http_server("json"))
+    results, diags = sweep(declared=[], ports=[port], timeout=3)
+    assert len(results) == 1
+    assert not [d for d in diags if d.code == "sweep.unsupported_platform"]
+
+
+def test_sweep_enumerates_from_the_socket_table_it_is_given(monkeypatch, tmp_path: Path,
+                                                            http_server):
+    """Positive control for the two tests above.
+
+    Without this, a substitution that silently failed to take effect would make
+    them pass on a machine that has no /proc for unrelated reasons.
+    """
+    port = _port_of(http_server("json"))
+    f = tmp_path / "tcp"
+    f.write_text(
+        "  sl  local_address rem_address   st\n"
+        f"   0: 0100007F:{port:04X} 00000000:0000 0A 00000000:00000000 00:00000000 0 1000\n"
+    )
+    monkeypatch.setattr("blastradius.sweep._PROC_TCP", (f,))
+    results, diags = sweep(declared=[], timeout=3)
+    assert len(results) == 1, "the substituted socket table was not read"
+    assert not [d for d in diags if d.code == "sweep.unsupported_platform"]
+    assert [d for d in diags if d.code == "sweep.shadow_agent"]
