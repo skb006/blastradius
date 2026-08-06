@@ -131,6 +131,7 @@ def analyse(
     resolve: bool = False,
     source: SecretSource | None = None,
     timeout: float = DEFAULT_TIMEOUT,
+    allow_remote: bool = True,
 ) -> CredentialReport:
     """Classify — and optionally resolve — every credential these servers carry.
 
@@ -139,10 +140,25 @@ def analyse(
         resolve: when False, no network traffic is generated at all.
         source: injected by tests.
         timeout: per issuer request.
+        allow_remote: when False, resolution is refused outright. Issuers are
+            all off-host by definition, so `--no-remote` — a flag whose whole
+            promise is that nothing leaves this machine — has to stop here too.
+            Refusing loudly rather than silently downgrading, because a user who
+            asked for resolution and got classification without being told would
+            read the weaker result as the stronger one.
     """
     src = source or SecretSource()
+    report_diags: list[Diagnostic] = []
+    if resolve and not allow_remote:
+        resolve = False
+        report_diags.append(Diagnostic(
+            "warn", "creds.resolution_suppressed",
+            "--resolve-credentials needs to contact each credential's issuer, "
+            "which is off-host; --no-remote is set, so credentials were only "
+            "classified. Scope and principal are UNKNOWN, not empty."))
     refs = collect_refs(servers, src)
     report = CredentialReport()
+    report.diagnostics.extend(report_diags)
 
     # Group AWS components per server: three keys, one identity.
     aws_by_server: dict[str, list[CredentialRef]] = {}

@@ -134,7 +134,18 @@ def _collect(args: argparse.Namespace) -> Inventory:
     home = args.home
     if args.no_home_scan:
         home = Path(tempfile.mkdtemp(prefix="blastradius-empty-"))
-    return discover(project_roots=args.root, home=home, extra_paths=args.config)
+    inv = discover(project_roots=args.root, home=home, extra_paths=args.config)
+    if args.no_home_scan and args.home is not None:
+        # Contradictory, and it used to resolve silently in favour of
+        # --no-home-scan. Someone auditing a mounted container filesystem with
+        # `--home /mnt/target --no-home-scan` got a clean "none found" that
+        # looked like a verdict about the target and was really a verdict
+        # about an empty temp directory. Say so rather than guess.
+        inv.diagnostics.append(Diagnostic(
+            "warn", "cli.contradictory_scope",
+            f"--home {args.home} was ignored because --no-home-scan is set; "
+            f"only --config/--root were scanned. Drop one of the two flags."))
+    return inv
 
 
 def cmd_discover(args: argparse.Namespace) -> int:
@@ -175,7 +186,8 @@ def cmd_probe(args: argparse.Namespace) -> int:
     creds: CredentialReport | None = None
     if args.classify_credentials or args.resolve_credentials:
         creds = analyse(inv.deduped(), resolve=args.resolve_credentials,
-                        timeout=args.timeout)
+                        timeout=args.timeout,
+                        allow_remote=not args.no_remote)
 
     all_diags = list(inv.diagnostics) + [d for r in results for d in r.diagnostics]
     if creds:
@@ -212,7 +224,7 @@ def cmd_prove(args: argparse.Namespace) -> int:
         inv.diagnostics.extend(sweep_diags)
 
     creds = analyse(inv.deduped(), resolve=args.resolve_credentials,
-                    timeout=args.timeout)
+                    timeout=args.timeout, allow_remote=not args.no_remote)
 
     try:
         policy = load_policy(args.policy) if args.policy else default_policy()

@@ -489,3 +489,130 @@ def test_probe_refuses_before_it_ever_builds_a_transport(monkeypatch):
     result = probe_mod.probe_server(spec, allow_spawn=False, timeout=1)
     assert result.status == "skipped"
     assert any(d.code == "probe.skipped_stdio" for d in result.diagnostics)
+
+
+# ---------------------------------------------------------------------------
+# Medium findings: crashes that discard the whole scan, and flags that lie
+# ---------------------------------------------------------------------------
+
+def test_an_out_of_range_port_does_not_abort_the_scan():
+    """REGRESSION: `parts.port` raises, and the traceback killed everything.
+
+    Worse, it exited 1 — indistinguishable from a normal run that found
+    problems. A malformed port is a fact about one server, not a reason to
+    stop auditing the other twenty.
+    """
+    spec = ServerSpec(name="x", transport="http", origin=Origin("/c", ""),
+                      url="http://127.0.0.1:99999/mcp")
+    assert spec.logical_identity  # must not raise
+
+
+def test_deeply_nested_json_is_a_diagnostic_not_a_crash(tmp_path):
+    """REGRESSION: RecursionError escaped _load_json and ended the scan."""
+    cfg = tmp_path / "deep.json"
+    cfg.write_text('{"a":' * 60000 + "1" + "}" * 60000)
+    inv = discover(home=tmp_path / "nohome", extra_paths=[cfg])
+    assert any(d.code == "config.malformed" for d in inv.diagnostics)
+
+
+def test_a_broken_yaml_policy_is_a_policy_error(tmp_path):
+    """REGRESSION: yaml.YAMLError surfaced as a raw traceback."""
+    from blastradius.prove.policy import PolicyError, load_policy
+
+    p = tmp_path / "bad.yaml"
+    p.write_text("rules: [\n  unclosed")
+    with pytest.raises(PolicyError, match="invalid YAML"):
+        load_policy(p)
+
+
+@pytest.mark.parametrize("url,expected", [
+    ("http://127.0.0.1:9/mcp", True),
+    ("http://localhost:9/mcp", True),
+    ("http://[::1]:9/mcp", True),
+    ("http://127.5.5.5:9/mcp", True),
+    # REGRESSION: `host.startswith("127.")` accepted these. Both are ordinary
+    # resolvable public hostnames, so --no-remote could be walked straight
+    # past by a config-controlled URL.
+    ("http://127.0.0.1.attacker.example/mcp", False),
+    ("http://localhost.evil.com/mcp", False),
+    ("http://169.254.169.254/latest/meta-data", False),
+])
+def test_loopback_detection_parses_addresses_rather_than_matching_text(url, expected):
+    from blastradius.probe import _is_loopback
+
+    assert _is_loopback(url) is expected
+
+
+def test_no_remote_also_suppresses_credential_resolution():
+    """REGRESSION: --no-remote promised no remote contact, then resolved anyway.
+
+    Issuers are off-host by definition. Suppression is loud, not silent: a
+    user who asked for resolution and got classification would otherwise read
+    the weaker result as the stronger one.
+    """
+    from blastradius.creds.resolve import analyse
+    from blastradius.creds.source import SecretSource
+
+    def boom(*a, **kw):
+        raise AssertionError("contacted an issuer under --no-remote")
+
+    spec = ServerSpec(name="gh", transport="http", origin=Origin("/c", ""),
+                      url="https://x/mcp", header_keys=("Authorization",),
+                      credential_keys=("Authorization",))
+    import blastradius.creds.providers as providers_mod
+    original = providers_mod._request
+    providers_mod._request = boom
+    try:
+        report = analyse([spec], resolve=True, allow_remote=False,
+                         source=SecretSource(environ={}))
+    finally:
+        providers_mod._request = original
+    assert any(d.code == "creds.resolution_suppressed" for d in report.diagnostics)
+
+
+def test_control_characters_in_a_server_name_cannot_reach_the_terminal(tmp_path):
+    """REGRESSION: a name containing ESC[2J cleared the operator's screen.
+
+    A security report an attacker can partially erase is worse than none.
+    """
+    from blastradius.report import render_inventory
+
+    esc = chr(27)
+    cfg = tmp_path / ".mcp.json"
+    cfg.write_text(json.dumps(
+        {"mcpServers": {f"evil{esc}[2Jcleared": {"command": "x"}}}))
+    inv = discover(home=tmp_path / "nohome", extra_paths=[cfg])
+    rendered = render_inventory(inv)
+    assert esc not in rendered
+    assert "\\x1b" in rendered, "the name should still be visible, just inert"
+
+
+@pytest.mark.parametrize("mapping,sensitive", [
+    ({"DATABASE_URL": "postgresql://svc:pw@db.internal/prod"}, True),
+    ({"REDIS_URL": "redis://:pw@h:6379"}, True),
+    ({"MONGODB_URI": "mongodb://u:p@h/db"}, True),
+    # ...but a plain server address is not a credential. Adding `url` to the
+    # needle list would report every HTTP MCP server as carrying a secret.
+    ({"url": "https://server.example/mcp"}, False),
+    ({"BASE_URL": "https://api.example.com"}, False),
+])
+def test_dsn_values_are_judged_by_shape_not_by_key_name(mapping, sensitive):
+    from blastradius.redact import split_keys
+
+    _all, secret = split_keys(mapping)
+    assert bool(secret) is sensitive
+
+
+def test_contradictory_home_flags_are_reported(tmp_path):
+    """REGRESSION: --home was silently ignored alongside --no-home-scan.
+
+    `--home /mnt/target --no-home-scan` returned a clean "none found" that
+    read as a verdict about the target and was really one about an empty
+    temp directory.
+    """
+    from blastradius.cli import build_parser, _collect
+
+    args = build_parser().parse_args(
+        ["discover", "--home", str(tmp_path), "--no-home-scan"])
+    inv = _collect(args)
+    assert any(d.code == "cli.contradictory_scope" for d in inv.diagnostics)

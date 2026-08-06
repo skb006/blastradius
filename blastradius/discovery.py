@@ -109,6 +109,20 @@ def _load_json(path: Path, diags: list[Diagnostic]) -> Any | None:
 
     try:
         return json.loads(text)
+    except RecursionError:
+        # A config nested thousands of levels deep exhausts the C stack inside
+        # json.loads. Treated as malformed rather than fatal: an unparseable
+        # config is an UNKNOWN inventory for that file, and the rest of the
+        # scan is still worth having.
+        diags.append(
+            Diagnostic(
+                "error", "config.malformed",
+                "JSON nesting too deep to parse — any servers declared here "
+                "are UNKNOWN, not absent",
+                Origin(str(path)),
+            )
+        )
+        return None
     except json.JSONDecodeError as exc:
         diags.append(
             Diagnostic(

@@ -40,6 +40,9 @@ _SENSITIVE_NEEDLES: tuple[str, ...] = (
     "clientid",
     "pat",
     "dsn",
+    "webhook",
+    "connectionstring",
+    "connstr",
 )
 
 # Keys that contain a needle but are not secrets. Without this,
@@ -87,12 +90,34 @@ def split_keys(mapping: dict | None) -> tuple[tuple[str, ...], tuple[str, ...]]:
     """Split a config mapping into (all keys, keys judged sensitive).
 
     Values are never returned. Callers get key names only.
+
+    A key is sensitive if its *name* says so (``GITHUB_TOKEN``) **or** if its
+    *value* is a DSN carrying its own credentials
+    (``DATABASE_URL=postgresql://svc:pw@db/prod``). The second test is what
+    catches the whole ``*_URL``/``*_URI`` family, and it is better than adding
+    ``url`` to the needle list: a bare ``url`` key is an MCP server's address,
+    and flagging it would report every HTTP server as carrying a credential.
+    Judge the value's shape, record only the name.
     """
     if not isinstance(mapping, dict):
         return ((), ())
     all_keys = tuple(sorted(str(k) for k in mapping))
-    sensitive = tuple(k for k in all_keys if looks_sensitive(k))
+    sensitive = tuple(
+        k for k in all_keys
+        if looks_sensitive(k) or _value_carries_credential(mapping.get(k))
+    )
     return all_keys, sensitive
+
+
+def _value_carries_credential(value: object) -> bool:
+    """Does this value embed a secret, whatever its key is called?
+
+    Returns a boolean — never the value, never any part of it.
+    """
+    if not isinstance(value, str) or "://" not in value:
+        return False
+    _safe, keys = scrub_url(value)
+    return bool(keys)
 
 
 def scrub(value: object, _depth: int = 0) -> object:

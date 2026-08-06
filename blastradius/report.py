@@ -36,6 +36,34 @@ def _sorted_diags(diags: Iterable[Diagnostic]) -> list[Diagnostic]:
     )
 
 
+_CONTROL = {c: f"\\x{c:02x}" for c in range(32)} | {127: "\\x7f"}
+del _CONTROL[9]  # tab is harmless and preserves alignment
+
+
+def _join(lines: list[str]) -> str:
+    """Join rendered lines, neutering control characters inside each one.
+
+    Sanitising per line rather than per interpolation is what makes this
+    reliable: every renderer funnels through here, so a future line that
+    forgets to wrap a config-controlled value is still covered. The newlines
+    between lines are ours and never pass through `safe`, so an injected
+    newline inside a server name shows up escaped instead of forging a row.
+    """
+    return "\n".join(safe(line) for line in lines)
+
+
+def safe(text: object) -> str:
+    """Neuter config-controlled text before it reaches a terminal.
+
+    Server names, tool names and URLs come from files this tool does not
+    control. A name containing ESC[2J clears the operator's screen; one
+    containing a carriage return rewrites the line above it. A security
+    report that an attacker can partially erase is worse than no report, so
+    every control character is escaped into its visible form.
+    """
+    return str(text).translate(_CONTROL)
+
+
 def render_inventory(inv: Inventory) -> str:
     out: list[str] = []
     servers = inv.deduped()
@@ -49,8 +77,8 @@ def render_inventory(inv: Inventory) -> str:
     for s in servers:
         n = copies.get(s.logical_identity, 1)
         dupe = f"  ({n} declarations)" if n > 1 else ""
-        target = s.url or (f"{s.command} {' '.join(s.args)}".strip() if s.command else "?")
-        out.append(f"  {s.name}  [{s.transport}]{dupe}")
+        target = safe(s.url or (f"{s.command} {' '.join(s.args)}".strip() if s.command else "?"))
+        out.append(f"  {safe(s.name)}  [{s.transport}]{dupe}")
         out.append(f"      target : {target}")
         group = endpoints.get(s.logical_identity, [])
         distinct = {g.url for g in group if g.url}
@@ -67,7 +95,7 @@ def render_inventory(inv: Inventory) -> str:
     out.append("")
     out.append(f"scanned {len(inv.scanned_paths)} config file(s); "
                f"{len(inv.servers)} declaration(s) -> {len(servers)} unique server(s)")
-    return "\n".join(out)
+    return _join(out)
 
 
 def render_probe(results: Sequence[ProbeResult], *, verbose: bool = False) -> str:
@@ -104,7 +132,7 @@ def render_probe(results: Sequence[ProbeResult], *, verbose: bool = False) -> st
     out.append(f"  tools discovered      : {cov['tools_discovered']}")
     out.append(f"  write-capable tools   : {cov['write_capable_tools']}")
     out.append(f"  resources discovered  : {cov['resources_discovered']}")
-    return "\n".join(out)
+    return _join(out)
 
 
 def render_diagnostics(diags: Iterable[Diagnostic]) -> str:
@@ -121,7 +149,7 @@ def render_diagnostics(diags: Iterable[Diagnostic]) -> str:
         counts[d.severity] = counts.get(d.severity, 0) + 1
     out.append("")
     out.append("  " + ", ".join(f"{v} {k}" for k, v in sorted(counts.items())))
-    return "\n".join(out)
+    return _join(out)
 
 
 def to_json(
@@ -165,7 +193,7 @@ def render_credentials(report: CredentialReport) -> str:
     out = ["CREDENTIAL AUTHORITY", "=" * 68]
     if not report.resolutions:
         out.append("  no credentials declared")
-        return "\n".join(out)
+        return _join(out)
 
     for r in sorted(report.resolutions, key=lambda r: r.ref.ident):
         c = r.classification
@@ -190,7 +218,7 @@ def render_credentials(report: CredentialReport) -> str:
     out.append("")
     out.append(f"  {s['credentials_found']} credential(s): "
                f"{s['resolved']} resolved, {s['inert']} inert")
-    return "\n".join(out)
+    return _join(out)
 
 
 def render_graph(graph) -> str:
@@ -213,7 +241,7 @@ def render_graph(graph) -> str:
             out.append(f"         {reason}")
     for note in graph.notes:
         out.append(f"  note: {note}")
-    return "\n".join(out)
+    return _join(out)
 
 
 def render_proof(report) -> str:
@@ -227,7 +255,7 @@ def render_proof(report) -> str:
 
     if not report.verdicts:
         out.append("  nothing to prove — no grants discovered")
-        return "\n".join(out)
+        return _join(out)
 
     deputies = [v for v in report.violations if v.confused_deputy]
     delegated = [v for v in report.violations if not v.confused_deputy]
@@ -273,4 +301,4 @@ def render_proof(report) -> str:
         out.append("  graph assumptions:")
         for n in report.graph_notes:
             out.append(f"    - {n}")
-    return "\n".join(out)
+    return _join(out)

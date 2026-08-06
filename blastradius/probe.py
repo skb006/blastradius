@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import time
 from typing import Iterable, Sequence
+import ipaddress
 from urllib.parse import urlparse
 
 from .model import Diagnostic, ProbeResult, ProbeStatus, ServerSpec
@@ -54,7 +55,17 @@ def _is_loopback(url: str | None) -> bool:
         host = (urlparse(url).hostname or "").lower()
     except ValueError:
         return False
-    return host in {"127.0.0.1", "localhost", "::1"} or host.startswith("127.")
+    # Parse as an address rather than matching text. `host.startswith("127.")`
+    # accepted `127.0.0.1.attacker.example`, which is a perfectly resolvable
+    # public hostname — so `--no-remote`, whose entire job is to guarantee no
+    # off-host contact, could be walked straight past by a config-controlled
+    # URL. A flag that promises containment has to actually contain.
+    if host in {"localhost", "ip6-localhost", "ip6-loopback"}:
+        return True
+    try:
+        return ipaddress.ip_address(host.strip("[]")).is_loopback
+    except ValueError:
+        return False
 
 
 def probe_server(

@@ -32,6 +32,13 @@ def cfg(tmp_path: Path) -> Path:
 
 BASE = ["probe", "--no-home-scan", "--no-remote", "--timeout", "1"]
 
+#: `--no-remote` now suppresses credential resolution, because issuers are
+#: off-host by definition and the flag promises nothing leaves the machine.
+#: Tests that need resolution to actually run therefore drop it; hermeticity
+#: comes from stubbing `P._request`, and the declared servers are loopback or
+#: stdio-without-spawn so probing generates no traffic either.
+RESOLVING = ["probe", "--no-home-scan", "--timeout", "1"]
+
 
 def test_classify_mode_makes_no_outbound_request(cfg, capsys, monkeypatch):
     def boom(*a, **k):  # pragma: no cover - must never run
@@ -65,7 +72,7 @@ def test_resolve_mode_contacts_only_pinned_issuers(cfg, capsys, monkeypatch):
         return 200, "<Arn>arn:aws:iam::9:user/x</Arn><Account>9</Account>", {}
 
     monkeypatch.setattr(P, "_request", spy)
-    main([*BASE, "-c", str(cfg), "--resolve-credentials"])
+    main([*RESOLVING, "-c", str(cfg), "--resolve-credentials"])
     out = capsys.readouterr().out
     assert set(hosts) <= {"api.github.com", "sts.amazonaws.com"}
     assert "github:octocat" in out
@@ -76,7 +83,7 @@ def test_resolve_mode_never_prints_a_value(cfg, capsys, monkeypatch):
     monkeypatch.setattr(
         P, "_request",
         lambda ep, **kw: (200, '{"login":"o"}', {"x-oauth-scopes": "repo"}))
-    main([*BASE, "-c", str(cfg), "--resolve-credentials"])
+    main([*RESOLVING, "-c", str(cfg), "--resolve-credentials"])
     out = capsys.readouterr().out
     for secret in ("ghp_realsecretvalue", "AKIAREALKEYID", "realsecretaccesskey"):
         assert secret not in out
@@ -89,7 +96,7 @@ def test_high_impact_scope_fails_the_build(cfg, capsys, monkeypatch):
         lambda ep, **kw: (200, '{"login":"octocat"}',
                           {"x-oauth-scopes": "repo,delete_repo"})
         if "github" in ep.url else (200, "<Arn>a</Arn>", {}))
-    rc = main([*BASE, "-c", str(cfg), "--resolve-credentials"])
+    rc = main([*RESOLVING, "-c", str(cfg), "--resolve-credentials"])
     assert rc == 1
     assert "creds.high_impact_scope" in capsys.readouterr().out
 
@@ -98,7 +105,7 @@ def test_json_output_includes_credentials_and_no_values(cfg, capsys, monkeypatch
     monkeypatch.setattr(
         P, "_request",
         lambda ep, **kw: (200, '{"login":"octocat"}', {"x-oauth-scopes": "repo"}))
-    main([*BASE, "-c", str(cfg), "--resolve-credentials", "--json"])
+    main([*RESOLVING, "-c", str(cfg), "--resolve-credentials", "--json"])
     out = capsys.readouterr().out
     doc = json.loads(out)
     assert doc["credentials"]["summary"]["credentials_found"] >= 2

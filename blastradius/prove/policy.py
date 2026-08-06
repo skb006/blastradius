@@ -80,7 +80,10 @@ def _load_document(path: Path) -> Any:
             raise PolicyError(
                 "YAML policies need PyYAML; use a .json policy or install "
                 "'blastradius[prove]'") from exc
-        return yaml.safe_load(text)
+        try:
+            return yaml.safe_load(text)
+        except yaml.YAMLError as exc:
+            raise PolicyError(f"{path}: invalid YAML: {exc}") from exc
     try:
         return json.loads(text)
     except json.JSONDecodeError as exc:

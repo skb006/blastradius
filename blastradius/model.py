@@ -33,16 +33,31 @@ def _recency(spec: "ServerSpec") -> tuple[float, str]:
     return (mtime, spec.origin.path)
 
 
+def _safe_port(parts: Any) -> int | None:
+    """``parts.port`` raises on an out-of-range port — 99999 in a config used
+    to abort the entire scan with a traceback, and an exit code that looked
+    exactly like a normal findings run. A malformed port is a finding about
+    that server, not a reason to stop auditing the other twenty."""
+    try:
+        return parts.port
+    except ValueError:
+        return None
+
+
 def _normalise_ephemeral_url(url: str) -> str:
     """Collapse ``http://127.0.0.1:39765/mcp`` -> ``http://127.0.0.1:<ephemeral>/mcp``."""
     try:
         parts = urlparse(url)
     except ValueError:
         return url
-    host = (parts.hostname or "").lower()
+    try:
+        host = (parts.hostname or "").lower()
+    except ValueError:
+        # A malformed netloc raises on attribute access, not on urlparse.
+        return url
     if host not in _LOOPBACK_HOSTS:
         return url
-    port = parts.port
+    port = _safe_port(parts)
     if port is None or not (_EPHEMERAL_LOW <= port <= _EPHEMERAL_HIGH):
         return url
     netloc = f"{parts.hostname}:<ephemeral>"
