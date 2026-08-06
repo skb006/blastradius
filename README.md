@@ -90,20 +90,20 @@ invoked a tool, the suite fails.
 
 ## What it finds
 
-Real output from the machine this was built on:
+Real output from the install this was built against (host-identifying detail redacted):
 
 ```
-sweep.shadow_agent: MCP server listening on 127.0.0.1:40279/mcp
+sweep.shadow_agent: MCP server listening on 127.0.0.1:<port>/mcp
                     is declared in NO config file
 sweep.all_declared_endpoints_dead: none of the declared loopback endpoints
                     are listening — configuration describes past sessions,
                     not current reach
-config.sprawl:      'openclaw' declared in 20 separate config copies
+config.sprawl:      'agent-runtime' declared in 20 separate config copies
 config.malformed:   invalid JSON — any servers declared here are UNKNOWN,
                     not absent
-probe.runtime_missing: command not found on PATH: 'bun'
+probe.runtime_missing: command not found on PATH: '<js-runtime>'
                     — this grant is declared but inert on this host
-server.carries_credentials: 'openclaw' carries 2 credential(s) whose backend
+server.carries_credentials: 'agent-runtime' carries 2 credential(s) whose backend
                     scope is not visible from config
 probe.unannotated_tools: 3/3 tools carry no readOnly/destructive hint
                     — counted as write-capable
@@ -114,7 +114,7 @@ probe.unannotated_tools: 3/3 tools carry no readOnly/destructive hint
 Measured on a real install:
 
 ```
-declared openclaw endpoints : 17 loopback ports
+declared loopback endpoints : 17 ephemeral ports across 21 config files
 actually listening          :  6 loopback ports
 intersection                : none
 ```

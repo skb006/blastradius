@@ -1,7 +1,9 @@
 # Phase 0 findings — is agent blast radius derivable?
 
-Measured against a real agent installation (this machine: OpenClaw + Claude Code +
-plugin marketplace + managed connectors), not a hypothetical.
+Measured against a real agent installation — a developer workstation running two
+agent runtimes, a plugin marketplace, and a set of managed cloud connectors — not
+a hypothetical. Host-identifying detail (connector vendors, plugin names, live
+port numbers) is redacted; every count and every ratio is as measured.
 
 ## Verdict
 
@@ -11,13 +13,13 @@ plugin marketplace + managed connectors), not a hypothetical.
 
 | source | count | note |
 |---|---|---|
-| ephemeral `mcp.json` under `~/tmp/openclaw-cli-mcp-*` | 21 | 20 identical, **1 unparseable** |
-| plugin-declared `.mcp.json` (vercel marketplace) | 4 | fakechat, telegram, imessage, discord |
-| MCP servers in `~/.claude.json` | 0 | global and project scope both empty |
-| skills in `openclaw.json` | 41 | **all disabled** |
+| ephemeral `mcp.json` under a per-session temp dir | 21 | 20 identical, **1 unparseable** |
+| plugin-declared `.mcp.json` (marketplace) | 4 | four messaging/chat plugins |
+| MCP servers in the agent's global config | 0 | global and project scope both empty |
+| skills declared by the runtime | 41 | **all disabled** |
 | `SKILL.md` with frontmatter | 3 | 2 declare `allowed-tools` |
-| explicit `denyCommands` | 8 | camera/screen/contacts/calendar/sms |
-| managed connectors live this session | 5 | Gmail, Calendar, Drive, Higgs, vercel |
+| explicit `denyCommands` | 8 | device-capability denials |
+| managed connectors live this session | 5 | configured in the vendor account, not on disk |
 
 The 21 ephemeral configs are the shadow-agent problem in miniature: agent
 authorization material scattered through temp directories, one of it already
@@ -147,21 +149,20 @@ Four distinct, all legitimate reasons — none of which the config-only model pr
 
 | reason | count | meaning |
 |---|---:|---|
-| `runtime_missing` | 4 | `bun` absent, so the plugin servers cannot run at all — declared grant, inert host |
+| `runtime_missing` | 4 | the plugins' JS runtime is not installed, so those servers cannot run at all — declared grant, inert host |
 | `unreachable` | 1 | every declared endpoint was a finished session |
 | `auth_required` | 2 | surface exists and is gated |
 
 ## The finding that changes the architecture
 
 ```
-declared openclaw endpoints : 33355 33929 36635 36969 38573 38671 39765 40121
-                              40293 40425 41979 43073 44461 45077 46033 46327 46439
-actually listening          : 5173 6379 8000 8001 18789 40279
+declared loopback endpoints : 17 distinct ephemeral ports, across 21 config files
+actually listening          :  6 loopback ports
 intersection                : none
 ```
 
-**All 17 declared endpoints were dead. The live agent held port 40279, declared
-in no file on disk.** Configuration is a record of sessions that have happened;
+**All 17 declared endpoints were dead. The live agent held a seventeenth port,
+declared in no file on disk.** Configuration is a record of sessions that have happened;
 the socket table is the record of what is happening.
 
 So stage 2 is two things, not one:
@@ -173,7 +174,7 @@ So stage 2 is two things, not one:
 The sweep found the shadow agent on the first run:
 
 ```
-sweep.shadow_agent: MCP server listening on 127.0.0.1:40279/mcp
+sweep.shadow_agent: MCP server listening on 127.0.0.1:<port>/mcp
                     is declared in NO config file (gated)
 ```
 
@@ -185,7 +186,7 @@ It strengthens it. The stages are not additive-optional, they are a **chain**:
 2. sweep → what is actually live (config missed it entirely)
 3. **resolve credentials → what it authorises** ← everything live was gated
 
-Both live MCP servers on this machine returned 401. The tool surface is
+Both live MCP servers returned 401. The tool surface is
 unreachable *without the credential*, which means stage 3 is not one of three
 routes to coverage — it is the only route past the gate. Phase 0 called
 credential→scope resolution "the moat" on the basis that it covered 54% of
@@ -193,7 +194,7 @@ grant edges. The live measurement is stronger: without it, recovery is 0%.
 
 ## Corrected estimate
 
-| stage | coverage on this host |
+| stage | coverage on the measured host |
 |---|---:|
 | parse only | 1.6% of grant edges |
 | + handshake | 0% of *servers* (everything inert, stale, or gated) |
