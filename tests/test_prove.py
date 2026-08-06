@@ -131,7 +131,9 @@ def test_unresolved_credential_is_treated_as_unbounded():
                     creds(status="network_error", principal=None))
     v = prove(g, write_policy()).violations
     assert len(v) == 1
-    assert v[0].dst == "principal:github:<unresolved>"
+    # The placeholder principal is scoped to the server, so two unresolved
+    # credentials stay distinct deputies rather than collapsing into one.
+    assert v[0].dst == "principal:github:<unresolved@github>"
 
 
 def test_live_credential_without_scopes_is_unbounded():

@@ -23,7 +23,7 @@ from typing import Any, Literal
 from ..model import Diagnostic, Origin
 
 #: Where a credential reference was found.
-CredSource = Literal["config_env", "config_header", "process_env"]
+CredSource = Literal["config_env", "config_header", "process_env", "config_embedded"]
 
 #: How confident the offline classifier is.
 Confidence = Literal["exact", "likely", "unknown"]

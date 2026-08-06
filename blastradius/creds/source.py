@@ -84,6 +84,13 @@ class SecretSource:
         """Return the literal, un-expanded config value for a reference."""
         if ref.source == "process_env":
             return self._environ.get(ref.key_name)
+        if ref.source == "config_embedded":
+            # A credential lifted out of a URL or argv. Its value was scrubbed
+            # at parse time and is deliberately unrecoverable — re-reading the
+            # config to get it back would defeat boundary redaction. It exists
+            # in the model only so the prover counts the server as carrying a
+            # credential; there is no value to return.
+            return None
 
         try:
             doc = json.loads(Path(ref.origin.path).read_text(encoding="utf-8"))
@@ -130,7 +137,15 @@ def refs_from_server(
         elif key in header_keys:
             where = "config_header"
         else:
-            continue
+            # A credential embedded in a URL or an argv element — its value was
+            # scrubbed at parse time, so it dereferences to nothing, but the
+            # server still *carries* it and presents it on every call. Dropping
+            # it here made the prover blind to a confused deputy that discovery
+            # had already flagged (`creds: <url-password>`), which is an
+            # under-approximation — the one direction this tool must not err in.
+            # Emitted value-less; it resolves as unbounded authority, the sound
+            # over-approximation.
+            where = "config_embedded"
         ref = CredentialRef(key_name=key, origin=origin, source=where, server_name=server_name)
         raw = src.raw_for(ref)
         refs.append(

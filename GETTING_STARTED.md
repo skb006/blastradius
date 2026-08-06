@@ -58,6 +58,11 @@ config declares** — this is how it finds "shadow agents" that a config-only vi
 misses entirely. `--no-remote` keeps all contact on `127.0.0.1`, so nothing
 leaves the machine.
 
+The sweep enumerates listening sockets via `/proc/net/tcp` on Linux and `lsof`
+on macOS/BSD. If neither is available it does **not** quietly report nothing — it
+emits a loud `sweep.unavailable` error, because a sweep that saw nothing because
+it *couldn't look* must never be mistaken for one that found nothing.
+
 Two flags you'll reach for:
 
 - `--allow-spawn` — **executes** the commands in stdio server configs to probe
@@ -96,6 +101,14 @@ A **confused deputy** means the server holds its own credential, so anyone who
 can reach it inherits that authority — the dangerous case. A **proof of absence**
 is the thing that's genuinely hard to get any other way: evidence that a path
 does *not* exist.
+
+One caveat worth stating plainly: a proof of absence only applies to a principal
+that was actually **discovered**. A deny-rule about `principal:aws:*` on a
+machine where no AWS credential was found reports `rule_matched_nothing` (the
+rule is vacuously satisfied — there is no such principal to reach), *not*
+`PROVEN UNREACHABLE`. You get the `[ok] cannot WRITE …` line when the principal
+exists in the inventory and nothing reaches it. "Nothing to deny" and "proven
+unreachable" are different facts, and the tool keeps them distinct.
 
 ## Reading the first run: it will be loud, on purpose
 
@@ -139,10 +152,12 @@ reported as success is exactly the failure this tool exists to prevent.
 
 ## Two safety facts worth knowing before you run it
 
-- **It never reads a credential *value*** unless you pass `--resolve-credentials`,
-  and even then each credential is sent only to its own issuer (GitHub → GitHub),
-  over a pinned connection that refuses redirects and proxies. Everything else
-  works from key names alone.
+- **It never *transmits* a credential value** unless you pass
+  `--resolve-credentials`, and even then each value goes only to its own issuer
+  (GitHub → GitHub), over a pinned connection that refuses redirects and proxies.
+  It *does* read values **locally** — it has to, in order to redact them and to
+  identify the issuer from the value's prefix — but nothing leaves the machine
+  without that flag. The property is no-exfiltration, not no-reading.
 - **It never executes anything from a config** unless you pass `--allow-spawn`.
 
 ## Confirm the build is sound
@@ -152,8 +167,10 @@ reported as success is exactly the failure this tool exists to prevent.
 .venv/bin/python -m pytest -q
 ```
 
-A green suite (400+ tests) means the security invariants above are holding on
-your machine, not just claimed in a README.
+A green suite means the security invariants above are holding on your machine,
+not just claimed in a README. The base `[dev]` install runs ~343 tests; the
+prover's own tests need `[prove]` (segval), which brings the full suite to
+470+. A handful skip on non-Linux — that's expected.
 
 ## Where to go next
 

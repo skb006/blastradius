@@ -179,10 +179,20 @@ def prove(graph: AgentGraph, policy: Policy) -> ProofReport:
         sources = [n for n in node_ids if rule.matches_src(n)]
         targets = [n for n in node_ids if rule.matches_dst(n)]
         if not sources or not targets:
+            which = "from" if not sources else "to"
+            pat = rule.from_pattern if not sources else rule.to_pattern
+            # Be explicit that this is NOT a proof of absence. A deny-rule whose
+            # target principal was never discovered is vacuously satisfied —
+            # there is nothing of that kind to reach — which is a weaker fact
+            # than "this discovered principal is provably unreachable". Users
+            # read PROVEN UNREACHABLE as a safety guarantee; this is not one, so
+            # it must not be dressed up as one.
             report.diagnostics.append(Diagnostic(
                 "info", "prove.rule_matched_nothing",
-                f"{rule.name!r}: no node matched "
-                f"{'from' if not sources else 'to'} pattern"))
+                f"{rule.name!r}: no discovered node matched the {which} pattern "
+                f"{pat!r}. The rule is vacuously satisfied (nothing of that kind "
+                f"is in the inventory) — this is NOT a proof that such a "
+                f"principal is unreachable, only that none was found to reach."))
             continue
 
         for src in sources:

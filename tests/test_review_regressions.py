@@ -616,3 +616,85 @@ def test_contradictory_home_flags_are_reported(tmp_path):
         ["discover", "--home", str(tmp_path), "--no-home-scan"])
     inv = _collect(args)
     assert any(d.code == "cli.contradictory_scope" for d in inv.diagnostics)
+
+
+# ---------------------------------------------------------------------------
+# A credential embedded in a URL or argv must reach the prover, not just the
+# discovery report. Found by differential testing across config shapes: this
+# host's credentials are all env-var references, so its own runs never exercised
+# the url/argv path, and the prover was silently blind to those confused deputies.
+# ---------------------------------------------------------------------------
+
+def test_argv_embedded_credential_surfaces_as_a_confused_deputy(tmp_path):
+    from blastradius.creds.resolve import analyse
+    from blastradius.creds.source import SecretSource
+    from blastradius.discovery import discover
+    from blastradius.prove.engine import prove as run_prove
+    from blastradius.prove.graph import build_graph
+    from blastradius.prove.policy import default_policy
+
+    cfg = tmp_path / ".mcp.json"
+    cfg.write_text(json.dumps({"mcpServers": {
+        "pg": {"command": "npx", "args": ["srv", "postgresql://app:SEKRET@db/main"]}}}))
+    inv = discover(home=tmp_path / "nohome", extra_paths=[cfg])
+
+    # discovery must see the embedded credential
+    assert inv.deduped()[0].credential_keys, "discovery missed the url credential"
+
+    creds = analyse(inv.deduped(), resolve=False, source=SecretSource(environ={}))
+    graph = build_graph(inv.deduped(), [], creds)
+    report = run_prove(graph, default_policy())
+
+    assert report.violations, "the confused deputy was invisible to prove"
+    assert report.violations[0].confused_deputy
+    # and the scrubbed value must not have leaked into any artifact
+    blob = json.dumps(creds.to_json()) + json.dumps(graph.to_json()) + json.dumps(report.to_json())
+    assert "SEKRET" not in blob
+
+
+@pytest.mark.parametrize("url_field", [
+    {"url": "https://mcp.example/x?api_key=SEKRET"},
+    {"url": "https://user:SEKRET@mcp.example/x"},
+])
+def test_url_embedded_credential_reaches_the_prover(tmp_path, url_field):
+    from blastradius.creds.resolve import analyse
+    from blastradius.creds.source import SecretSource
+    from blastradius.discovery import discover
+    from blastradius.prove.engine import prove as run_prove
+    from blastradius.prove.graph import build_graph
+    from blastradius.prove.policy import default_policy
+
+    cfg = tmp_path / ".mcp.json"
+    cfg.write_text(json.dumps({"mcpServers": {"svc": url_field}}))
+    inv = discover(home=tmp_path / "nohome", extra_paths=[cfg])
+    creds = analyse(inv.deduped(), resolve=False, source=SecretSource(environ={}))
+    graph = build_graph(inv.deduped(), [], creds)
+    report = run_prove(graph, default_policy())
+    assert report.violations, "url-embedded credential produced no confused deputy"
+
+
+def test_two_unresolved_deputies_are_reported_separately(tmp_path):
+    """Differential-testing find: two servers with unresolved credentials both
+    mapped to one principal:{provider}:<unresolved> node, so the prover reported
+    ONE deputy and named ONE server — hiding that the second was equally exposed.
+    """
+    from blastradius.creds.resolve import analyse
+    from blastradius.creds.source import SecretSource
+    from blastradius.discovery import discover
+    from blastradius.prove.engine import prove as run_prove
+    from blastradius.prove.graph import build_graph
+    from blastradius.prove.policy import default_policy
+
+    cfg = tmp_path / ".mcp.json"
+    cfg.write_text(json.dumps({"mcpServers": {
+        "db": {"command": "n", "args": ["s", "postgres://u:PW1@a/x"]},
+        "cache": {"command": "n", "args": ["s", "redis://:PW2@b/y"]},
+    }}))
+    inv = discover(home=tmp_path / "nohome", extra_paths=[cfg])
+    creds = analyse(inv.deduped(), resolve=False, source=SecretSource(environ={}))
+    report = run_prove(build_graph(inv.deduped(), [], creds), default_policy())
+
+    deputies = [v for v in report.violations if v.confused_deputy]
+    named = {h.src for v in deputies for h in v.witness if h.src.startswith("mcp:")}
+    assert len(deputies) == 2, f"expected both servers as deputies, got {len(deputies)}"
+    assert named == {"mcp:db", "mcp:cache"}

@@ -252,9 +252,19 @@ def build_graph(
         if res.status not in ("resolved",):
             # Unresolved credential of unknown authority: sound default is a
             # write edge to an unnamed principal for that provider.
+            #
+            # Scope the placeholder principal to the SERVER, not just the
+            # provider. Two servers with unresolved credentials are two distinct
+            # confused deputies; collapsing them onto one
+            # `principal:{provider}:<unresolved>` node made the prover report a
+            # single finding and name one server, hiding that the other is
+            # equally exposed — an under-report of blast-radius breadth. We do
+            # not know the two are the same backend, so the complete choice is
+            # to keep them separate.
             provider = res.classification.provider
-            pid = f"principal:{provider}:<unresolved>"
-            g.add_node(Node(pid, "principal", f"{provider} (authority unknown)"))
+            who = res.ref.server_name or "?"
+            pid = f"principal:{provider}:<unresolved@{who}>"
+            g.add_node(Node(pid, "principal", f"{provider} via {who} (authority unknown)"))
             g.add_edge(Edge(
                 src=server_id, dst=pid, operation="<unresolved>", capability="write",
                 evidence=f"{res.ref.ident} carries {provider} authority of unknown "

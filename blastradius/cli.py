@@ -43,9 +43,10 @@ BANNER = (
     "blastradius — read-only MCP prober. It never invokes a tool and never "
     "writes findings anywhere but your terminal. It contacts the MCP endpoints "
     "declared in your config, because that is how their surface is discovered; "
-    "--no-remote restricts that to loopback. Only --resolve-credentials reads a "
-    "credential value, and it presents it to that credential's own issuer and "
-    "nowhere else — redirects and proxies are refused, not followed."
+    "--no-remote restricts that to loopback. Credential values are read LOCALLY "
+    "to redact them and identify the issuer, but are never TRANSMITTED except "
+    "under --resolve-credentials, which presents each value to that credential's "
+    "own issuer and nowhere else — redirects and proxies refused, not followed."
 )
 
 

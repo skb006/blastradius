@@ -151,9 +151,18 @@ def test_refs_mark_literal_values_without_indirection(cfg):
     assert refs[0].indirection is None
 
 
-def test_refs_ignore_keys_in_neither_bucket(cfg):
+def test_embedded_credential_still_produces_a_valueless_ref(cfg):
+    """A credential in credential_keys but neither env nor header came from a
+    URL or argv. It MUST still produce a reference — dropping it made the
+    prover blind to a confused deputy discovery had already flagged. The value
+    was scrubbed at parse time, so the ref carries no recoverable value.
+    """
+    origin = Origin(str(cfg), "mcpServers.gh")
     refs = refs_from_server(
-        "gh", Origin(str(cfg), "mcpServers.gh"),
-        env_keys=(), header_keys=(), credential_keys=("GHOST",),
+        "gh", origin,
+        env_keys=(), header_keys=(), credential_keys=("<url-password>",),
         source=SecretSource(environ={}))
-    assert refs == []
+    assert len(refs) == 1
+    assert refs[0].source == "config_embedded"
+    # scrubbed at parse time — deliberately unrecoverable
+    assert SecretSource(environ={}).value_for(refs[0]) is None
