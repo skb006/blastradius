@@ -172,3 +172,64 @@ def test_credential_shaped_values_are_flagged_regardless_of_name(value):
 ])
 def test_credential_free_values_are_not_flagged_by_shape(value):
     assert value_is_credential_shaped(value) is False
+
+
+# ---------------------------------------------------------------------------
+# End-to-end: the whole discovery predicate on a realistic process environment.
+# This is the committed form of the check that was run by hand against pid 730 —
+# the gate must clear the noise AND keep every real credential, together.
+# ---------------------------------------------------------------------------
+
+from blastradius.creds.classify import is_discovery_credential  # noqa: E402
+
+# The exact shape the real gateway process had: 29 benign OS/session variables,
+# three of which tripped the name needle and started this whole fix. Values are
+# realistic but inert.
+PID_730_SHAPED_ENVIRON = {
+    "SSH_AUTH_SOCK": "/run/user/1000/keyring/ssh",           # was a false positive
+    "DBUS_SESSION_BUS_ADDRESS": "unix:path=/run/user/1000/bus",  # was a false positive
+    "QT_ACCESSIBILITY": "1",                                 # was a false positive
+    "PATH": "/usr/local/bin:/usr/bin:/bin",
+    "HOME": "/home/agent", "USER": "agent", "SHELL": "/bin/zsh",
+    "LANG": "en_US.UTF-8", "TERM": "xterm-256color", "SHLVL": "1",
+    "PWD": "/home/agent/projects", "OLDPWD": "/home/agent",
+    "XDG_SESSION_TYPE": "wayland", "XDG_SESSION_CLASS": "user",
+    "XDG_RUNTIME_DIR": "/run/user/1000", "DISPLAY": ":0",
+    "GPG_TTY": "/dev/pts/2", "SSH_AGENT_PID": "3210",
+    "XAUTHORITY": "/run/user/1000/.mutter-Xwaylandauth.AB12CD",
+    "SESSION_MANAGER": "local/host:@/tmp/.ICE-unix/3000",
+    "COLORTERM": "truecolor", "EDITOR": "vim", "PAGER": "less",
+    "NODE_ENV": "production", "npm_config_cache": "/home/agent/.npm",
+    "MOTD_SHOWN": "pam", "DEBUGINFOD_URLS": "https://debuginfod.example",
+    "LESSCLOSE": "/usr/bin/lesspipe %s %s",
+}
+
+# Real credentials the gateway did NOT have, injected to prove the gate keeps
+# them. Fabricated values; DATABASE_URL has an innocent name caught only by shape.
+INJECTED_SECRETS = {
+    "GITHUB_TOKEN": "ghp_" + "A1" * 18,
+    "PGPASSWORD": "hunter2",
+    "DATABASE_URL": "postgresql://svc:S3cr3tPw@db.internal:5432/prod",
+    "OPENAI_API_KEY": "sk-proj-" + "x" * 40,
+}
+
+
+def test_pid_730_shape_yields_no_false_positives():
+    """The real machine's environment: 29 benign vars, zero credential-bearing."""
+    flagged = [k for k, v in PID_730_SHAPED_ENVIRON.items()
+               if is_discovery_credential(k, v)]
+    assert flagged == [], f"benign vars still flagged: {flagged}"
+
+
+def test_injected_secrets_are_all_kept():
+    """Every real credential is found — including the innocent-named DATABASE_URL."""
+    env = {**PID_730_SHAPED_ENVIRON, **INJECTED_SECRETS}
+    flagged = {k for k, v in env.items() if is_discovery_credential(k, v)}
+    assert flagged == set(INJECTED_SECRETS), (
+        f"expected exactly the secrets, got {sorted(flagged)}")
+
+
+@pytest.mark.parametrize("name,value", SECRETS)
+def test_discovery_predicate_flags_every_soundness_critical_secret(name, value):
+    """The full predicate, not just value_looks_benign, must catch each one."""
+    assert is_discovery_credential(name, value) is True

@@ -32,12 +32,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from blastradius.creds.model import CredentialRef
 from blastradius.creds.resolve import resolve_refs
-from blastradius.creds.classify import (
-    classify, value_is_credential_shaped, value_looks_benign,
-)
+from blastradius.creds.classify import classify, is_discovery_credential
 from blastradius.creds.source import SecretSource
 from blastradius.model import Origin
-from blastradius.redact import looks_sensitive
 from blastradius.report import render_credentials
 
 
@@ -76,21 +73,11 @@ def main() -> int:
     # only ever read here to classify it; it is never printed or returned.
     refs: list[CredentialRef] = []
     for key in sorted(env):
-        value = env[key]
-        cls = classify(key, value)
-        # A positive value-based classification (known prefix / JWT / key pattern)
-        # ALWAYS counts — never second-guess a credential the issuer's own format
-        # confirms. The value-shape gate only refines the noisy name-based signal,
-        # clearing socket paths and booleans while defaulting everything else to
-        # secret. This is what turns 3 false positives + 0 real into signal.
-        is_credential = (
-            cls.provider != "unknown"
-            or value_is_credential_shaped(value)
-            or (looks_sensitive(key) and not value_looks_benign(key, value))
-        )
-        if is_credential:
-            # source="process_env" tells SecretSource to read the value straight
-            # from this environ by key name.
+        # The value-shape gate lives in the package (is_discovery_credential),
+        # so the discovery predicate is tested as a whole rather than reproduced
+        # here. source="process_env" tells SecretSource to read the value
+        # straight from this environ by key name.
+        if is_discovery_credential(key, env[key]):
             refs.append(CredentialRef(key, origin, "process_env", server_name=f"pid:{pid}"))
 
     if not refs:

@@ -264,6 +264,30 @@ def value_looks_benign(key: str, value: str | None) -> bool:
     return False
 
 
+def is_discovery_credential(key: str, value: str | None) -> bool:
+    """Should this ``(name, value)`` pair be treated as a credential to resolve?
+
+    The discovery predicate, in one place so it can be tested as a whole rather
+    than reconstructed at every call site. Three arms, in priority order:
+
+    1. a positive value-based classification (a known issuer prefix, a JWT, a
+       key-pattern) — never second-guessed;
+    2. a credential-shaped value, whatever the name — catches
+       ``DATABASE_URL=postgres://u:pw@h`` and webhooks the name misses;
+    3. a sensitive name whose value is not a recognised benign shape.
+
+    Arm 3 is where the value-shape gate earns its place: it clears the socket
+    paths and booleans that a name-only check flags, while defaulting everything
+    it does not recognise to secret.
+    """
+    from ..redact import looks_sensitive
+    if classify(key, value).provider != "unknown":
+        return True
+    if value_is_credential_shaped(value):
+        return True
+    return looks_sensitive(key) and not value_looks_benign(key, value)
+
+
 def is_aws_component(key: str) -> str | None:
     """Map an AWS credential component to its role.
 
