@@ -148,6 +148,26 @@ def analyse(
             read the weaker result as the stronger one.
     """
     src = source or SecretSource()
+    refs = collect_refs(servers, src)
+    return resolve_refs(refs, src=src, resolve=resolve, timeout=timeout,
+                        allow_remote=allow_remote)
+
+
+def resolve_refs(
+    refs: Sequence[CredentialRef],
+    *,
+    src: SecretSource,
+    resolve: bool = False,
+    timeout: float = DEFAULT_TIMEOUT,
+    allow_remote: bool = True,
+) -> CredentialReport:
+    """Classify — and optionally resolve — a pre-collected set of references.
+
+    Split out of ``analyse`` so a caller with references from somewhere other
+    than a config file — a running process's environment, say — resolves them
+    through exactly the same pinned, scrubbed path the CLI uses, rather than
+    reimplementing the dispatch and losing a safety guarantee in the copy.
+    """
     report_diags: list[Diagnostic] = []
     if resolve and not allow_remote:
         resolve = False
@@ -156,7 +176,6 @@ def analyse(
             "--resolve-credentials needs to contact each credential's issuer, "
             "which is off-host; --no-remote is set, so credentials were only "
             "classified. Scope and principal are UNKNOWN, not empty."))
-    refs = collect_refs(servers, src)
     report = CredentialReport()
     report.diagnostics.extend(report_diags)
 
